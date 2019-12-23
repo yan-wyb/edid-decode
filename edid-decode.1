@@ -13,9 +13,14 @@ standard input. If [out] is given then the EDID that was read from [in]
 is written to [out] or to standard output if [out] is '-'. By default
 the output is written as a hex dump when writing to standard output or
 a raw EDID if written to a file.
+
+If [out] is given then edid-decode only does the conversion, it will
+skip the decoding step.
 .PP
 Input files may be raw binaries or ASCII text.  ASCII input is scanned for
 hex dumps; heuristics are included to search for hexdumps in
+.B edid-decode(1)
+output (as long as the initial hex dump was included),
 .B xrandr(1)
 property output and
 .B Xorg(1)
@@ -23,6 +28,38 @@ log file formats, otherwise the data is treated as a raw hexdump.  EDID blocks
 for connected monitors can be found in
 .B /sys/class/drm/*/edid
 on modern Linux systems with kernel modesetting support.
+
+.SH STANDARDS
+.TP
+The following EDID standards are supported by edid-decode:
+.RS
+.TP
+EDID 1.3: VESA Enhanced Extended Display Identication Data Standard, Release A, Revision 1
+.TP
+EDID 1.4: VESA Enhanced Extended Display Identication Data Standard, Release A, Revision 2
+.TP
+DisplayID 1.3: VESA Display Identification Data (DisplayID) Standard, Version 1.3
+.TP
+DisplayID 2.0: VESA DisplayID Standard, Version 2.0
+.TP
+DI-EXT: VESA Display Information Extension Block Standard, Release A
+.TP
+LS-EXT: VESA Enhanced EDID Localized String Extension Standard, Release A
+.TP
+VTB-EXT: VESA Video Timing Block Extension Data Standard, Release A
+.TP
+HDMI 1.4b: High-Definition Multimedia Interface, Version 1.4b
+.TP
+HDMI 2.1: High-Definition Multimedia Interface, Version 2.1
+.TP
+HDMI 2.1: Amendment A1 to HDMI Specification Version 2.1
+.TP
+CTA-861-G: A DTV Profile for Uncompressed High Speed Digital Interfaces
+.TP
+SPWG Notebook Panel Specification, Version 3.5
+.TP
+EPI Embedded Panel Interface, Revision 1.0
+.RE
 
 .SH OPTIONS
 .TP
@@ -41,7 +78,23 @@ raw: binary data (default unless writing to stdout)
 carray: c-program struct
 .TP
 \fB\-c\fR, \fB\-\-check\fR
-Check if the EDID conforms to the standards.
+Check if the EDID conforms to the standards. Warnings and failures are
+reported at the end.
+.TP
+\fB\-C\fR, \fB\-\-check\-inline\fR
+Check if the EDID conforms to the standards. Warnings and failures are
+reported as they happen.
+.TP
+\fB\-s\fR, \fB\-\-skip\-hex\-dump\fR
+Skip the initial hex dump of the EDID.
+.TP
+\fB\-\-skip\-sha\fR
+Don't show the SHA hash. Normally edid-decode will show the SHA, i.e. the
+hash of the git commit used to compile edid-decode. This uniquely identifies
+the version of edid-decode that is used to generate the warnings and
+failures. But it will also change the output of edid-decode for every new commit
+in the git repository, even if nothing else changed in the edid-decode output.
+Use this option to avoid including the SHA in the edid-decode output.
 .TP
 \fB\-e\fR, \fB\-\-extract\fR
 Extract the contents of the first block in hex values.

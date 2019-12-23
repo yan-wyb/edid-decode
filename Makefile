@@ -1,8 +1,17 @@
 bindir ?= /usr/bin
 mandir ?= /usr/share/man
 
-edid-decode: edid-decode.c
-	$(CC) $(CFLAGS) $(LDFLAGS) -g -Wall -o $@ $< -lm
+SOURCES = edid-decode.cpp parse-base-block.cpp parse-cta-block.cpp \
+	  parse-displayid-block.cpp parse-ls-ext-block.cpp \
+	  parse-di-ext-block.cpp parse-vtb-ext-block.cpp
+WARN_FLAGS = -Wall -Wextra -Wno-missing-field-initializers -Wno-unused-parameter
+
+all: edid-decode
+
+sha = -DSHA=$(shell if [ -d .git ]; then git rev-parse HEAD ; else printf '"not available"'; fi)
+
+edid-decode: $(SOURCES) edid-decode.h Makefile
+	$(CXX) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $(WARN_FLAGS) -g $(sha) -o $@ $(SOURCES) -lm
 
 clean:
 	rm -f edid-decode
