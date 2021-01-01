@@ -1,3 +1,12 @@
+edid-decode (0.1~git20201230.95d81c9-2) unstable; urgency=medium
+
+  * Bump debhelper from old 11 to 13.
+  * Set debhelper-compat version in Build-Depends.
+  * Set Standards-Version to 4.5.1.
+  * Switch to the machine-readable copyright file format.
+
+ -- Andrej Shadura <andrewsh@debian.org>  Fri, 01 Jan 2021 23:37:47 +0100
+
 edid-decode (0.1~git20201230.95d81c9-1) unstable; urgency=medium
 
   * New upstream release.
