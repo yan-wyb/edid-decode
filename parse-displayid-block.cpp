@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: MIT
 /*
  * Copyright 2006-2012 Red Hat, Inc.
- * Copyright 2018-2019 Cisco Systems, Inc. and/or its affiliates. All rights reserved.
+ * Copyright 2018-2020 Cisco Systems, Inc. and/or its affiliates. All rights reserved.
  *
  * Author: Adam Jackson <ajax@nwnk.net>
  * Maintainer: Hans Verkuil <hverkuil-cisco@xs4all.nl>
  */
 
-#include <string.h>
 #include <math.h>
 
 #include "edid-decode.h"
@@ -41,12 +40,17 @@ static void print_flags(const char *label, unsigned char flag_byte,
 	printf("\n");
 }
 
-static void check_displayid_datablock_revision(const unsigned char *x)
+void edid_state::check_displayid_datablock_revision(unsigned char hdr,
+						    unsigned char valid_flags,
+						    unsigned char rev)
 {
-	unsigned char revisionflags = x[1];
+	unsigned char revision = hdr & 7;
+	unsigned char flags = hdr & ~7 & ~valid_flags;
 
-	if (revisionflags)
-		warn("Unexpected revision and flags (0x%02x != 0)\n", revisionflags);
+	if (revision != rev)
+		warn("Unexpected revision (%u != %u).\n", revision, rev);
+	if (flags)
+		warn("Unexpected flags (0x%02x).\n", flags);
 }
 
 static bool check_displayid_datablock_length(const unsigned char *x,
@@ -57,11 +61,11 @@ static bool check_displayid_datablock_length(const unsigned char *x,
 	unsigned char len = x[2];
 
 	if (expectedlenmin == expectedlenmax && len != expectedlenmax)
-		fail("DisplayID payload length is different than expected (%d != %d)\n", len, expectedlenmax);
+		fail("DisplayID payload length is different than expected (%d != %d).\n", len, expectedlenmax);
 	else if (len > expectedlenmax)
-		fail("DisplayID payload length is greater than expected (%d > %d)\n", len, expectedlenmax);
+		fail("DisplayID payload length is greater than expected (%d > %d).\n", len, expectedlenmax);
 	else if (len < expectedlenmin)
-		fail("DisplayID payload length is less than expected (%d < %d)\n", len, expectedlenmin);
+		fail("DisplayID payload length is less than expected (%d < %d).\n", len, expectedlenmin);
 	else
 		return true;
 
@@ -72,18 +76,25 @@ static bool check_displayid_datablock_length(const unsigned char *x,
 
 // tag 0x00 and 0x20
 
-static void parse_displayid_product_id(const unsigned char *x, bool is_v2)
+void edid_state::parse_displayid_product_id(const unsigned char *x)
 {
-	check_displayid_datablock_revision(x);
+	check_displayid_datablock_revision(x[1]);
 
-	if (is_v2)
-		printf("    Vendor IEEE OUI: %02X-%02X-%02X\n", x[3], x[4], x[5]);
-	else
+	dispid.has_product_identification = true;
+	if (dispid.version >= 0x20) {
+		unsigned oui = (x[3] << 16) | (x[4] << 8) | x[5];
+		printf("    Vendor OUI %s\n", ouitohex(oui).c_str());
+	} else {
 		printf("    Vendor ID: %c%c%c\n", x[3], x[4], x[5]);
+	}
 	printf("    Product Code: %u\n", x[6] | (x[7] << 8));
 	unsigned sn = x[8] | (x[9] << 8) | (x[10] << 16) | (x[11] << 24);
-	if (sn)
-		printf("    Serial Number: %u\n", sn);
+	if (sn) {
+		if (hide_serial_numbers)
+			printf("    Serial Number: ...\n");
+		else
+			printf("    Serial Number: %u\n", sn);
+	}
 	unsigned week = x[12];
 	unsigned year = 2000 + x[13];
 	printf("    %s: %u",
@@ -125,13 +136,14 @@ static void print_flag_lines(const char *indent, const char *label,
 	}
 }
 
-static void parse_displayid_parameters(const unsigned char *x)
+void edid_state::parse_displayid_parameters(const unsigned char *x)
 {
-	check_displayid_datablock_revision(x);
+	check_displayid_datablock_revision(x[1]);
 
 	if (!check_displayid_datablock_length(x, 12, 12))
 		return;
 
+	dispid.has_display_parameters = true;
 	printf("    Image size: %.1f mm x %.1f mm\n",
 	       ((x[4] << 8) + x[3]) / 10.0,
 	       ((x[6] << 8) + x[5]) / 10.0);
@@ -168,7 +180,7 @@ static double fp2d(unsigned short fp)
 
 void edid_state::parse_displayid_color_characteristics(const unsigned char *x)
 {
-	check_displayid_datablock_revision(x);
+	check_displayid_datablock_revision(x[1], 0xf8, 1);
 
 	unsigned cie_year = (x[1] & 0x80) ? 1976 : 1931;
 	unsigned xfer_id = (x[1] >> 3) & 0x0f;
@@ -181,8 +193,8 @@ void edid_state::parse_displayid_color_characteristics(const unsigned char *x)
 	printf("    Uses %u CIE (x, y) coordinates\n", cie_year);
 	if (xfer_id) {
 		printf("    Associated with Transfer Characteristics Data Block with Identifier %u\n", xfer_id);
-		if (!(preparse_xfer_ids & (1 << xfer_id)))
-			fail("Missing Transfer Characteristics Data Block with Identifier %u\n", xfer_id);
+		if (!(dispid.preparse_xfer_ids & (1 << xfer_id)))
+			fail("Missing Transfer Characteristics Data Block with Identifier %u.\n", xfer_id);
 	}
 	if (!num_primaries) {
 		printf("    Uses color space %s\n",
@@ -209,12 +221,14 @@ void edid_state::parse_displayid_color_characteristics(const unsigned char *x)
 
 // tag 0x03 and 0x22
 
-void edid_state::parse_displayid_type_1_7_timing(const unsigned char *x, bool type7)
+void edid_state::parse_displayid_type_1_7_timing(const unsigned char *x,
+						 bool type7, unsigned block_rev, bool is_cta)
 {
 	struct timings t = {};
 	unsigned hbl, vbl;
 	std::string s("aspect ");
 
+	dispid.has_type_1_7 = true;
 	t.pixclk_khz = (type7 ? 1 : 10) * (1 + (x[0] + (x[1] << 8) + (x[2] << 16)));
 	switch (x[3] & 0xf) {
 	case 0:
@@ -258,7 +272,8 @@ void edid_state::parse_displayid_type_1_7_timing(const unsigned char *x, bool ty
 		break;
 	default:
 		s += "undefined";
-		fail("Unknown aspect 0x%02x\n", x[3] & 0xf);
+		if ((x[3] & 0xf) > (dispid.version <= 0x12 ? 7 : 8))
+			fail("Unknown aspect 0x%02x.\n", x[3] & 0xf);
 		break;
 	}
 	switch ((x[3] >> 5) & 0x3) {
@@ -273,9 +288,11 @@ void edid_state::parse_displayid_type_1_7_timing(const unsigned char *x, bool ty
 		break;
 	case 3:
 		s += ", reserved";
-		fail("Reserved stereo 0x03\n");
+		fail("Reserved stereo 0x03.\n");
 		break;
 	}
+	if (block_rev >= 2 && (x[3] & 0x80))
+		s += ", YCbCr 4:2:0";
 
 	t.hact = 1 + (x[4] | (x[5] << 8));
 	hbl = 1 + (x[6] | (x[7] << 8));
@@ -298,10 +315,38 @@ void edid_state::parse_displayid_type_1_7_timing(const unsigned char *x, bool ty
 		t.vsync /= 2;
 		t.vbp /= 2;
 	}
-	if (x[3] & 0x80)
+	if (block_rev < 2 && (x[3] & 0x80)) {
 		s += ", preferred";
+		dispid.preferred_timings.push_back(timings_ext(t, "DTD", s));
+	}
 
-	print_detailed_timings("    ", t, s.c_str());
+	print_timings("    ", &t, "DTD", s.c_str(), true);
+	if (is_cta) {
+		timings_ext te(t, "DTD", s);
+		cta.vec_vtdbs.push_back(te);
+
+		// Only use a T7VTDB if is cannot be expressed by a
+		// DTD or a T10VTDB.
+		if (t.hact <= 4095 && t.vact <= 4095 &&
+		    t.pixclk_khz <= 655360 && !(x[3] & 0xe0)) {
+			fail("This T7VTDB can be represented as an 18-byte DTD.\n");
+			return;
+		}
+		unsigned htot = t.hact + t.hfp + t.hsync + t.hbp;
+		unsigned vtot = t.vact + t.vfp + t.vsync + t.vbp;
+		unsigned refresh = (t.pixclk_khz * 1000ULL) / (htot * vtot);
+
+		for (unsigned rb = 0; rb <= 3; rb++) {
+			timings cvt_t = calc_cvt_mode(refresh, t.hact, t.vact, rb);
+			if (match_timings(t, cvt_t)) {
+				fail("This T7VTDB can be represented as a T10VTDB.\n");
+				return;
+			}
+		}
+		timings cvt_t = calc_cvt_mode(refresh, t.hact, t.vact, 3 | RB_FLAG);
+		if (match_timings(t, cvt_t))
+			fail("This T7VTDB can be represented as a T10VTDB.\n");
+	}
 }
 
 // tag 0x04
@@ -351,13 +396,15 @@ void edid_state::parse_displayid_type_2_timing(const unsigned char *x)
 		break;
 	case 3:
 		s += ", reserved";
-		fail("Reserved stereo 0x03\n");
+		fail("Reserved stereo 0x03.\n");
 		break;
 	}
-	if (x[3] & 0x80)
+	if (x[3] & 0x80) {
 		s += ", preferred";
+		dispid.preferred_timings.push_back(timings_ext(t, "DTD", s));
+	}
 
-	print_detailed_timings("    ", t, s.c_str());
+	print_timings("    ", &t, "DTD", s.c_str(), true);
 }
 
 // tag 0x05
@@ -409,7 +456,8 @@ void edid_state::parse_displayid_type_3_timing(const unsigned char *x)
 		break;
 	default:
 		s += "undefined";
-		fail("Unknown aspect 0x%02x\n", x[3] & 0xf);
+		if ((x[3] & 0xf) > (dispid.version <= 0x12 ? 7 : 8))
+			fail("Unknown aspect 0x%02x.\n", x[3] & 0xf);
 		break;
 	}
 
@@ -419,34 +467,40 @@ void edid_state::parse_displayid_type_3_timing(const unsigned char *x)
 
 	edid_cvt_mode(1 + (x[2] & 0x7f), t);
 
-	if (x[0] & 0x80)
+	if (x[0] & 0x80) {
 		s += ", preferred";
+		dispid.preferred_timings.push_back(timings_ext(t, "CVT", s));
+	}
 
-	print_detailed_timings("    ", t, s.c_str());
+	print_timings("    ", &t, "CVT", s.c_str());
 }
 
 // tag 0x06 and 0x23
 
-void edid_state::parse_displayid_type_4_8_timing(unsigned char type, unsigned short id)
+void edid_state::parse_displayid_type_4_8_timing(unsigned char type, unsigned short id, bool is_cta)
 {
 	const struct timings *t = NULL;
-	char suffix[16];
+	char type_name[16];
 
 	switch (type) {
-	case 0: t = find_dmt_id(id); strcpy(suffix, "DMT"); break;
-	case 1: t = find_vic_id(id); sprintf(suffix, "VIC %3u", id); break;
-	case 2: t = find_hdmi_vic_id(id); sprintf(suffix, "HDMI VIC %u", id); break;
+	case 0: t = find_dmt_id(id); sprintf(type_name, "DMT 0x%02x", id); break;
+	case 1: t = find_vic_id(id); sprintf(type_name, "VIC %3u", id); break;
+	case 2: t = find_hdmi_vic_id(id); sprintf(type_name, "HDMI VIC %u", id); break;
 	default: break;
 	}
 	if (t)
-		print_timings("    ", t, suffix);
+		print_timings("    ", t, type_name);
+	if (t && is_cta && !cta.t8vtdb.is_valid()) {
+		timings_ext te(*t, type_name, "");
+		cta.t8vtdb = te;
+	}
 }
 
 // tag 0x09
 
-static void parse_displayid_video_timing_range_limits(const unsigned char *x)
+void edid_state::parse_displayid_video_timing_range_limits(const unsigned char *x)
 {
-	check_displayid_datablock_revision(x);
+	check_displayid_datablock_revision(x[1]);
 
 	if (!check_displayid_datablock_length(x, 15, 15))
 		return;
@@ -469,18 +523,18 @@ static void parse_displayid_video_timing_range_limits(const unsigned char *x)
 
 // tag 0x0a and 0x0b
 
-static void parse_displayid_string(const unsigned char *x)
+void edid_state::parse_displayid_string(const unsigned char *x)
 {
-	check_displayid_datablock_revision(x);
+	check_displayid_datablock_revision(x[1]);
 	if (check_displayid_datablock_length(x))
-		printf("    %s\n", extract_string(x + 3, x[2]));
+		printf("    Text: '%s'\n", extract_string(x + 3, x[2]));
 }
 
 // tag 0x0c
 
-static void parse_displayid_display_device(const unsigned char *x)
+void edid_state::parse_displayid_display_device(const unsigned char *x)
 {
-	check_displayid_datablock_revision(x);
+	check_displayid_datablock_revision(x[1]);
 
 	if (!check_displayid_datablock_length(x, 13, 13))
 		return;
@@ -568,7 +622,7 @@ static void parse_displayid_display_device(const unsigned char *x)
 	case 0x01: printf("Fast Scan is on the Major (Long) Axis and Slow Scan is on the Minor Axis\n"); break;
 	case 0x02: printf("Fast Scan is on the Minor (Short) Axis and Slow Scan is on the Major Axis\n"); break;
 	case 0x03: printf("Reserved\n");
-		   fail("Scan Direction used the reserved value 0x03\n");
+		   fail("Scan Direction used the reserved value 0x03.\n");
 		   break;
 	}
 	printf("    Sub-pixel layout/configuration/shape: ");
@@ -598,9 +652,9 @@ static void parse_displayid_display_device(const unsigned char *x)
 
 // tag 0x0d
 
-static void parse_displayid_intf_power_sequencing(const unsigned char *x)
+void edid_state::parse_displayid_intf_power_sequencing(const unsigned char *x)
 {
-	check_displayid_datablock_revision(x);
+	check_displayid_datablock_revision(x[1]);
 
 	if (!check_displayid_datablock_length(x, 6, 6))
 		return;
@@ -617,7 +671,7 @@ static void parse_displayid_intf_power_sequencing(const unsigned char *x)
 
 void edid_state::parse_displayid_transfer_characteristics(const unsigned char *x)
 {
-	check_displayid_datablock_revision(x);
+	check_displayid_datablock_revision(x[1], 0xf0, 1);
 
 	unsigned xfer_id = x[1] >> 4;
 	bool first_is_white = x[3] & 0x80;
@@ -625,8 +679,8 @@ void edid_state::parse_displayid_transfer_characteristics(const unsigned char *x
 
 	if (xfer_id) {
 		printf("    Transfer Characteristics Data Block Identifier: %u\n", xfer_id);
-		if (!(preparse_color_ids & (1 << xfer_id)))
-			fail("Missing Color Characteristics Data Block using Identifier %u\n", xfer_id);
+		if (!(dispid.preparse_color_ids & (1 << xfer_id)))
+			fail("Missing Color Characteristics Data Block using Identifier %u.\n", xfer_id);
 	}
 	if (first_is_white)
 		printf("    The first curve is the 'white' transfer characteristic\n");
@@ -660,13 +714,14 @@ void edid_state::parse_displayid_transfer_characteristics(const unsigned char *x
 
 // tag 0x0f
 
-static void parse_displayid_display_intf(const unsigned char *x)
+void edid_state::parse_displayid_display_intf(const unsigned char *x)
 {
-	check_displayid_datablock_revision(x);
+	check_displayid_datablock_revision(x[1]);
 
 	if (!check_displayid_datablock_length(x, 10, 10))
 		return;
 
+	dispid.has_display_interface_features = true;
 	printf("    Interface Type: ");
 	switch (x[3] >> 4) {
 	case 0x00:
@@ -745,7 +800,7 @@ static void parse_displayid_display_intf(const unsigned char *x)
 
 void edid_state::parse_displayid_stereo_display_intf(const unsigned char *x)
 {
-	check_displayid_datablock_revision(x);
+	check_displayid_datablock_revision(x[1], 0xc0, 1);
 
 	switch (x[1] >> 6) {
 	case 0x00: printf("    Timings that explicitly report 3D capability\n"); break;
@@ -810,21 +865,21 @@ void edid_state::parse_displayid_stereo_display_intf(const unsigned char *x)
 	while (1U + (x[0] & 0x1f) <= len) {
 		unsigned num_codes = x[0] & 0x1f;
 		unsigned type = x[0] >> 6;
-		char suffix[16];
+		char type_name[16];
 
 		for (unsigned i = 1; i <= num_codes; i++) {
 			switch (type) {
 			case 0x00:
-				strcpy(suffix, "DMT");
-				print_timings("    ", find_dmt_id(x[i]), suffix);
+				sprintf(type_name, "DMT 0x%02x", x[i]);
+				print_timings("    ", find_dmt_id(x[i]), type_name);
 				break;
 			case 0x01:
-				sprintf(suffix, "VIC %3u", x[i]);
-				print_timings("    ", find_vic_id(x[i]), suffix);
+				sprintf(type_name, "VIC %3u", x[i]);
+				print_timings("    ", find_vic_id(x[i]), type_name);
 				break;
 			case 0x02:
-				sprintf(suffix, "HDMI VIC %u", x[i]);
-				print_timings("    ", find_hdmi_vic_id(x[i]), suffix);
+				sprintf(type_name, "HDMI VIC %u", x[i]);
+				print_timings("    ", find_hdmi_vic_id(x[i]), type_name);
 				break;
 			}
 		}
@@ -857,30 +912,33 @@ void edid_state::parse_displayid_type_5_timing(const unsigned char *x)
 		break;
 	case 3:
 		s += ", reserved";
-		fail("Reserved stereo 0x03\n");
+		fail("Reserved stereo 0x03.\n");
 		break;
 	}
 	if (x[0] & 0x10)
 		s += ", refresh rate * (1000/1001) supported";
-	if (x[0] & 0x80)
-		s += ", preferred";
 
-	switch (x[0] & 0x03) {
-	case 0: t.rb = 2; break;
-	case 1: t.rb = 1; break;
-	default: break;
-	}
+	t.rb = 2;
+	if ((x[0] & 0x03) == 1)
+		warn("Unexpected use of 'custom reduced blanking'.\n");
+	else if ((x[0] & 0x03) > 1)
+		fail("Invalid Timing Formula.\n");
 
 	edid_cvt_mode(1 + x[6], t);
 
-	print_detailed_timings("    ", t, s.c_str());
+	if (x[0] & 0x80) {
+		s += ", preferred";
+		dispid.preferred_timings.push_back(timings_ext(t, "CVT", s));
+	}
+
+	print_timings("    ", &t, "CVT", s.c_str());
 }
 
 // tag 0x12 and 0x28
 
-static void parse_displayid_tiled_display_topology(const unsigned char *x, bool is_v2)
+void edid_state::parse_displayid_tiled_display_topology(const unsigned char *x, bool is_v2)
 {
-	check_displayid_datablock_revision(x);
+	check_displayid_datablock_revision(x[1]);
 
 	if (!check_displayid_datablock_length(x, 22, 22))
 		return;
@@ -910,9 +968,9 @@ static void parse_displayid_tiled_display_topology(const unsigned char *x, bool 
 	default: printf("Reserved\n"); break;
 	}
 	if (caps & 0x80)
-		printf("    Tiled display consists of multiple physical display enclosures\n");
-	else
 		printf("    Tiled display consists of a single physical display enclosure\n");
+	else
+		printf("    Tiled display consists of multiple physical display enclosures\n");
 	printf("    Num horizontal tiles: %u Num vertical tiles: %u\n",
 	       num_h_tile + 1, num_v_tile + 1);
 	printf("    Tile location: %u, %u\n", tile_h_location, tile_v_location);
@@ -928,11 +986,11 @@ static void parse_displayid_tiled_display_topology(const unsigned char *x, bool 
 			printf("    Left bevel size: %.1f pixels\n",
 			       pix_mult * x[15] / 10.0);
 		} else {
-			fail("No bevel information, but the pixel multiplier is non-zero\n");
+			fail("No bevel information, but the pixel multiplier is non-zero.\n");
 		}
 		printf("    Tile resolution: %ux%u\n", tile_width + 1, tile_height + 1);
 	} else if (pix_mult) {
-		fail("No bevel information, but the pixel multiplier is non-zero\n");
+		fail("No bevel information, but the pixel multiplier is non-zero.\n");
 	}
 	if (is_v2)
 		printf("    Tiled Display Manufacturer/Vendor ID: %02X-%02X-%02X\n",
@@ -942,8 +1000,11 @@ static void parse_displayid_tiled_display_topology(const unsigned char *x, bool 
 		       x[0x10], x[0x11], x[0x12]);
 	printf("    Tiled Display Product ID Code: %u\n",
 	       x[0x13] | (x[0x14] << 8));
-	printf("    Tiled Display Serial Number: %u\n",
-	       x[0x15] | (x[0x16] << 8) | (x[0x17] << 16)| (x[0x18] << 24));
+	if (hide_serial_numbers)
+		printf("    Tiled Display Serial Number: ...\n");
+	else
+		printf("    Tiled Display Serial Number: %u\n",
+		       x[0x15] | (x[0x16] << 8) | (x[0x17] << 16)| (x[0x18] << 24));
 }
 
 // tag 0x13
@@ -997,14 +1058,16 @@ void edid_state::parse_displayid_type_6_timing(const unsigned char *x)
 		break;
 	case 3:
 		s += ", reserved";
-		fail("Reserved stereo 0x03\n");
+		fail("Reserved stereo 0x03.\n");
 		break;
 	}
 
-	if (x[2] & 0x80)
+	if (x[2] & 0x80) {
 		s += ", preferred";
+		dispid.preferred_timings.push_back(timings_ext(t, "DTD", s));
+	}
 
-	print_detailed_timings("    ", t, s.c_str());
+	print_timings("    ", &t, "DTD", s.c_str(), true);
 }
 
 static std::string ieee7542d(unsigned short fp)
@@ -1021,9 +1084,9 @@ static std::string ieee7542d(unsigned short fp)
 
 // tag 0x21
 
-static void parse_displayid_parameters_v2(const unsigned char *x)
+void edid_state::parse_displayid_parameters_v2(const unsigned char *x)
 {
-	check_displayid_datablock_revision(x);
+	check_displayid_datablock_revision(x[1]);
 
 	if (!check_displayid_datablock_length(x, 29, 29))
 		return;
@@ -1031,6 +1094,7 @@ static void parse_displayid_parameters_v2(const unsigned char *x)
 	unsigned hor_size = (x[4] << 8) + x[3];
 	unsigned vert_size = (x[6] << 8) + x[5];
 
+	dispid.has_display_parameters = true;
 	if (x[1] & 0x80)
 		printf("    Image size: %u mm x %u mm\n",
 		       hor_size, vert_size);
@@ -1120,7 +1184,7 @@ void edid_state::parse_displayid_type_9_timing(const unsigned char *x)
 		break;
 	case 3:
 		s += ", reserved";
-		fail("Reserved stereo 0x03\n");
+		fail("Reserved stereo 0x03.\n");
 		break;
 	}
 	if (x[0] & 0x10)
@@ -1134,14 +1198,14 @@ void edid_state::parse_displayid_type_9_timing(const unsigned char *x)
 
 	edid_cvt_mode(1 + x[5], t);
 
-	print_detailed_timings("    ", t, s.c_str());
+	print_timings("    ", &t, "CVT", s.c_str());
 }
 
 // tag 0x25
 
-static void parse_displayid_dynamic_video_timings_range_limits(const unsigned char *x)
+void edid_state::parse_displayid_dynamic_video_timings_range_limits(const unsigned char *x)
 {
-	check_displayid_datablock_revision(x);
+	check_displayid_datablock_revision(x[1], 0, (x[1] & 7) == 1);
 
 	if (!check_displayid_datablock_length(x, 9, 9))
 		return;
@@ -1151,7 +1215,10 @@ static void parse_displayid_dynamic_video_timings_range_limits(const unsigned ch
 	printf("    Maximum Pixel Clock: %u kHz\n",
 	       1 + (x[6] | (x[7] << 8) | (x[8] << 16)));
 	printf("    Minimum Vertical Refresh Rate: %u Hz\n", x[9]);
-	printf("    Maximum Vertical Refresh Rate: %u Hz\n", x[10]);
+	if (x[1] & 7)
+		printf("    Maximum Vertical Refresh Rate: %u Hz\n", x[10] + ((x[11] & 3) << 8));
+	else
+		printf("    Maximum Vertical Refresh Rate: %u Hz\n", x[10]);
 	printf("    Seamless Dynamic Video Timing Support: %s\n",
 	       (x[11] & 0x80) ? "Yes" : "No");
 }
@@ -1195,13 +1262,14 @@ static const char *eotfs[] = {
 	"Custom"
 };
 
-static void parse_displayid_interface_features(const unsigned char *x)
+void edid_state::parse_displayid_interface_features(const unsigned char *x)
 {
-	check_displayid_datablock_revision(x);
+	check_displayid_datablock_revision(x[1]);
 
 	if (!check_displayid_datablock_length(x, 9))
 		return;
 
+	dispid.has_display_interface_features = true;
 	unsigned len = x[2];
 	if (len > 0) print_flags("    Supported bpc for RGB encoding", x[3], bpc444);
 	if (len > 1) print_flags("    Supported bpc for YCbCr 4:4:4 encoding", x[4], bpc444);
@@ -1253,9 +1321,9 @@ static void parse_displayid_interface_features(const unsigned char *x)
 
 // tag 0x29
 
-static void parse_displayid_ContainerID(const unsigned char *x)
+void edid_state::parse_displayid_ContainerID(const unsigned char *x)
 {
-	check_displayid_datablock_revision(x);
+	check_displayid_datablock_revision(x[1]);
 
 	if (check_displayid_datablock_length(x, 16, 16)) {
 		x += 3;
@@ -1268,15 +1336,129 @@ static void parse_displayid_ContainerID(const unsigned char *x)
 	}
 }
 
+// tag 0x32
+
+void edid_state::parse_displayid_type_10_timing(const unsigned char *x, bool is_cta)
+{
+	struct timings t = {};
+	std::string s("aspect ");
+
+	t.hact = 1 + (x[1] | (x[2] << 8));
+	t.vact = 1 + (x[3] | (x[4] << 8));
+	calc_ratio(&t);
+	s += std::to_string(t.hratio) + ":" + std::to_string(t.vratio);
+
+	switch ((x[0] >> 5) & 0x3) {
+	case 0:
+		s += ", no 3D stereo";
+		break;
+	case 1:
+		s += ", 3D stereo";
+		break;
+	case 2:
+		s += ", 3D stereo depends on user action";
+		break;
+	case 3:
+		s += ", reserved";
+		fail("Reserved stereo 0x03.\n");
+		break;
+	}
+
+	switch (x[0] & 0x07) {
+	case 1: t.rb = 1; break;
+	case 2: t.rb = 2; break;
+	case 3: t.rb = 3; break;
+	default: break;
+	}
+
+	if (x[0] & 0x10) {
+		if (t.rb == 2) {
+			s += ", refresh rate * (1000/1001) supported";
+		} else if (t.rb == 3) {
+			s += ", hblank is 160 pixels";
+			t.rb |= RB_FLAG;
+		} else {
+			fail("VR_HB must be 0.\n");
+		}
+	}
+	if (x[0] & 0x80)
+		s += ", YCbCr 4:2:0";
+
+	edid_cvt_mode(1 + x[5], t);
+
+	print_timings("    ", &t, "CVT", s.c_str());
+	if (is_cta) {
+		timings_ext te(t, "CVT", s);
+		cta.vec_vtdbs.push_back(te);
+	}
+}
+
+// tag 0x7e, OUI 3A-02-92 (VESA)
+
+void edid_state::parse_displayid_vesa(const unsigned char *x)
+{
+	check_displayid_datablock_revision(x[1]);
+
+	if (!check_displayid_datablock_length(x, 5, 7))
+		return;
+
+	unsigned len = x[2];
+	x += 6;
+	printf("    Data Structure Type: ");
+	switch (x[0] & 0x07) {
+	case 0x00: printf("eDP\n"); break;
+	case 0x01: printf("DP\n"); break;
+	default: printf("Reserved\n"); break;
+	}
+	printf("    Default Colorspace and EOTF Handling: %s\n",
+	       (x[0] & 0x80) ? "Native as specified in the Display Parameters DB" : "sRGB");
+	printf("    Number of Pixels in Hor Pix Cnt Overlapping an Adjacent Panel: %u\n",
+	       x[1] & 0xf);
+	printf("    Multi-SST Operation: ");
+	switch ((x[1] >> 5) & 0x03) {
+	case 0x00: printf("Not Supported\n"); break;
+	case 0x01: printf("Two Streams (number of links shall be 2 or 4)\n"); break;
+	case 0x02: printf("Four Streams (number of links shall be 4)\n"); break;
+	case 0x03: printf("Reserved\n"); break;
+	}
+	if (len >= 7) {
+		double bpp = (x[2] & 0x3f) + (x[3] & 0x0f) / 16.0;
+		printf("    Pass through timing's target DSC bits per pixel: %.4f\n", bpp);
+	}
+}
+
+// tag 0x81
+
+void edid_state::parse_displayid_cta_data_block(const unsigned char *x)
+{
+	check_displayid_datablock_revision(x[1]);
+
+	unsigned len = x[2];
+	unsigned i;
+
+	if (len > 248) {
+		fail("Length is > 248.\n");
+		len = 248;
+	}
+	x += 3;
+
+	for (i = 0; i < len; i += (x[i] & 0x1f) + 1)
+		cta_block(x + i);
+
+	if (i != len)
+		fail("Length is %u instead of %u.\n", len, i);
+}
+
 // DisplayID main
 
-static std::string product_type(unsigned version, unsigned char x, bool heading)
+std::string edid_state::product_type(unsigned char x, bool heading)
 {
 	std::string headingstr;
 
-	if (version < 0x20) {
+	if (dispid.version < 0x20) {
 		headingstr = "Display Product Type";
 		if (heading) return headingstr;
+		dispid.is_display = x == 2 || x == 3 || x == 4 || x == 6;
 		switch (x) {
 		case 0: return "Extension Section";
 		case 1: return "Test Structure; test equipment only";
@@ -1290,6 +1472,7 @@ static std::string product_type(unsigned version, unsigned char x, bool heading)
 	} else {
 		headingstr = "Display Product Primary Use Case";
 		if (heading) return headingstr;
+		dispid.is_display = x >= 2 && x <= 8;
 		switch (x) {
 		case 0: return "Same primary use case as the base section";
 		case 1: return "Test Structure; test equipment only";
@@ -1303,7 +1486,7 @@ static std::string product_type(unsigned version, unsigned char x, bool heading)
 		default: break;
 		}
 	}
-	fail("Unknown %s 0x%02x\n", headingstr.c_str(), x);
+	fail("Unknown %s 0x%02x.\n", headingstr.c_str(), x);
 	return std::string("Unknown " + headingstr + " (") + utohex(x) + ")";
 }
 
@@ -1316,15 +1499,17 @@ void edid_state::preparse_displayid_block(const unsigned char *x)
 
 	unsigned offset = 5;
 
+	dispid.preparse_displayid_blocks++;
 	while (length > 0) {
 		unsigned tag = x[offset];
+		unsigned len = x[offset + 2];
 
 		switch (tag) {
 		case 0x02:
-			preparse_color_ids |= 1 << ((x[offset + 1] >> 3) & 0x0f);
+			dispid.preparse_color_ids |= 1 << ((x[offset + 1] >> 3) & 0x0f);
 			break;
 		case 0x0e:
-			preparse_xfer_ids |= 1 << ((x[offset + 1] >> 4) & 0x0f);
+			dispid.preparse_xfer_ids |= 1 << ((x[offset + 1] >> 4) & 0x0f);
 			break;
 		default:
 			break;
@@ -1332,8 +1517,6 @@ void edid_state::preparse_displayid_block(const unsigned char *x)
 
 		if (length < 3)
 			break;
-
-		unsigned len = x[offset + 2];
 
 		if (length < len + 3)
 			break;
@@ -1354,27 +1537,44 @@ void edid_state::parse_displayid_block(const unsigned char *x)
 	unsigned ext_count = x[4];
 	unsigned i;
 
-	printf("%s Version %u.%u Length %u Extension Count %u\n",
-	       block.c_str(), version >> 4, version & 0xf,
-	       length, ext_count);
+	printf("  Version: %u.%u\n  Extension Count: %u\n",
+	       version >> 4, version & 0xf, ext_count);
 
-	if (ext_count > 0)
-		warn("Non-0 DisplayID extension count %d\n", ext_count);
-
-	printf("%s: %s\n", product_type(version, prod_type, true).c_str(),
-	       product_type(version, prod_type, false).c_str());
+	if (dispid.is_base_block) {
+		dispid.version = version;
+		printf("  %s: %s\n", product_type(prod_type, true).c_str(),
+		       product_type(prod_type, false).c_str());
+		if (!prod_type)
+			fail("DisplayID Base Block has no product type.\n");
+		if (ext_count != dispid.preparse_displayid_blocks - 1)
+			fail("Expected %u DisplayID Extension Block%s, but got %u.\n",
+			     ext_count,
+			     ext_count > 1 ? "s" : "",
+			     dispid.preparse_displayid_blocks - 1);
+	} else {
+		if (prod_type)
+			fail("Product Type should be 0 in extension block.\n");
+		if (ext_count)
+			fail("Extension Count should be 0 in extension block.\n");
+		if (version != dispid.version)
+			fail("Got version %u.%u, expected %u.%u.\n",
+			     version >> 4, version & 0xf,
+			     dispid.version >> 4, dispid.version & 0xf);
+	}
 
 	if (length > 121) {
-		fail("DisplayID length %d is greater than 121\n", length);
+		fail("DisplayID length %d is greater than 121.\n", length);
 		length = 121;
 	}
 
 	unsigned offset = 5;
+	bool first_data_block = true;
 	while (length > 0) {
 		unsigned tag = x[offset];
+		unsigned oui = 0;
 
 		switch (tag) {
-			// DisplayID 1.3:
+		// DisplayID 1.3:
 		case 0x00: data_block = "Product Identification Data Block (" + utohex(tag) + ")"; break;
 		case 0x01: data_block = "Display Parameters Data Block (" + utohex(tag) + ")"; break;
 		case 0x02: data_block = "Color Characteristics Data Block"; break;
@@ -1383,7 +1583,7 @@ void edid_state::parse_displayid_block(const unsigned char *x)
 		case 0x05: data_block = "Video Timing Modes Type 3 - Short Timings Data Block"; break;
 		case 0x06: data_block = "Video Timing Modes Type 4 - DMT Timings Data Block"; break;
 		case 0x07: data_block = "Supported Timing Modes Type 1 - VESA DMT Timings Data Block"; break;
-		case 0x08: data_block = "Supported Timing Modes Type 2 - CTA Timings Data Block"; break;
+		case 0x08: data_block = "Supported Timing Modes Type 2 - CTA-861 Timings Data Block"; break;
 		case 0x09: data_block = "Video Timing Range Data Block"; break;
 		case 0x0a: data_block = "Product Serial Number Data Block"; break;
 		case 0x0b: data_block = "GP ASCII String Data Block"; break;
@@ -1395,8 +1595,8 @@ void edid_state::parse_displayid_block(const unsigned char *x)
 		case 0x11: data_block = "Video Timing Modes Type 5 - Short Timings Data Block"; break;
 		case 0x12: data_block = "Tiled Display Topology Data Block (" + utohex(tag) + ")"; break;
 		case 0x13: data_block = "Video Timing Modes Type 6 - Detailed Timings Data Block"; break;
-			   // 0x14 .. 0x7e RESERVED for Additional VESA-defined Data Blocks
-			   // DisplayID 2.0
+		// 0x14 .. 0x7e RESERVED for Additional VESA-defined Data Blocks
+		// DisplayID 2.0
 		case 0x20: data_block = "Product Identification Data Block (" + utohex(tag) + ")"; break;
 		case 0x21: data_block = "Display Parameters Data Block (" + utohex(tag) + ")"; break;
 		case 0x22: data_block = "Video Timing Modes Type 7 - Detailed Timings Data Block"; break;
@@ -1407,72 +1607,110 @@ void edid_state::parse_displayid_block(const unsigned char *x)
 		case 0x27: data_block = "Stereo Display Interface Data Block (" + utohex(tag) + ")"; break;
 		case 0x28: data_block = "Tiled Display Topology Data Block (" + utohex(tag) + ")"; break;
 		case 0x29: data_block = "ContainerID Data Block"; break;
-			   // 0x2a .. 0x7d RESERVED for Additional VESA-defined Data Blocks
+		case 0x32: data_block = "Video Timing Modes Type 10 - Formula-based Timings Data Block"; break;
+		// 0x2a .. 0x7d RESERVED for Additional VESA-defined Data Blocks
 		case 0x7e: // DisplayID 2.0
-		case 0x7f: data_block = "Vendor-specific Data Block (" + utohex(tag) + ")"; break; // DisplayID 1.3
-			   // 0x7f .. 0x80 RESERVED
-		case 0x81: data_block = "CTA DisplayID Data Block (" + utohex(tag) + ")"; break;
-			   // 0x82 .. 0xff RESERVED
+		case 0x7f: // DisplayID 1.3
+			if ((tag == 0x7e && version >= 0x20) ||
+			    (tag == 0x7f && version < 0x20)) {
+				oui = (x[offset + 3] << 16) + (x[offset + 4] << 8) + x[offset + 5];
+				const char *name = oui_name(oui);
+				bool reversed = false;
+
+				if (!name) {
+					name = oui_name(oui, true);
+					if (name)
+						reversed = true;
+				}
+				if (name)
+					data_block = std::string("Vendor-Specific Data Block (") + name + ")";
+				else
+					data_block = "Vendor-Specific Data Block, OUI " + ouitohex(oui);
+				if (reversed)
+					fail((std::string("OUI ") + ouitohex(oui) + " is in the wrong byte order.\n").c_str());
+			} else {
+				data_block = "Unknown DisplayID Data Block (" + utohex(tag) + ")";
+			}
+			break;
+		// 0x80 RESERVED
+		case 0x81: data_block = "CTA-861 DisplayID Data Block (" + utohex(tag) + ")"; break;
+		// 0x82 .. 0xff RESERVED
 		default:   data_block = "Unknown DisplayID Data Block (" + utohex(tag) + ")"; break;
 		}
+
+		if (version >= 0x20 && (tag < 0x20 || tag == 0x7f))
+			fail("Use of DisplayID v1.x tag for DisplayID v%u.%u.\n",
+			     version >> 4, version & 0xf);
+		if (version < 0x20 && tag >= 0x20 && tag <= 0x7e)
+			fail("Use of DisplayID v2.0 tag for DisplayID v%u.%u.\n",
+			     version >> 4, version & 0xf);
 
 		if (length < 3) {
 			// report a problem when the remaining bytes are not 0.
 			if (tag || x[offset + 1]) {
-				fail("Not enough bytes remain (%d) for a DisplayID data block or the DisplayID filler is non-0\n", length);
+				fail("Not enough bytes remain (%d) for a DisplayID data block or the DisplayID filler is non-0.\n", length);
 			}
 			break;
 		}
 
+		unsigned block_rev = x[offset + 1] & 0x07;
 		unsigned len = x[offset + 2];
 
 		if (length < len + 3) {
-			fail("The length of this DisplayID data block (%d) exceeds the number of bytes remaining (%d)\n", len + 3, length);
+			fail("The length of this DisplayID data block (%d) exceeds the number of bytes remaining (%d).\n", len + 3, length);
 			break;
 		}
 
 		if (!tag && !len) {
 			// A Product Identification Data Block with no payload bytes is not valid - assume this is the end.
 			if (!memchk(x + offset, length)) {
-				fail("Non-0 filler bytes in the DisplayID block\n");
+				fail("Non-0 filler bytes in the DisplayID block.\n");
 			}
 			break;
 		}
 
-		printf("  %s\n", data_block.c_str());
+		printf("  %s:\n", data_block.c_str());
 
 		switch (tag) {
-		case 0x00: parse_displayid_product_id(x + offset, false); break;
+		case 0x00: parse_displayid_product_id(x + offset); break;
 		case 0x01: parse_displayid_parameters(x + offset); break;
 		case 0x02: parse_displayid_color_characteristics(x + offset); break;
 		case 0x03:
+			   check_displayid_datablock_revision(x[offset + 1], 0, block_rev & 1);
 			   for (i = 0; i < len / 20; i++)
-				   parse_displayid_type_1_7_timing(&x[offset + 3 + (i * 20)], false);
+				   parse_displayid_type_1_7_timing(&x[offset + 3 + (i * 20)], false, block_rev);
 			   break;
 		case 0x04:
+			   check_displayid_datablock_revision(x[offset + 1]);
 			   for (i = 0; i < len / 11; i++)
 				   parse_displayid_type_2_timing(&x[offset + 3 + (i * 11)]);
 			   break;
 		case 0x05:
+			   check_displayid_datablock_revision(x[offset + 1], 0, block_rev & 1);
 			   for (i = 0; i < len / 3; i++)
 				   parse_displayid_type_3_timing(&x[offset + 3 + (i * 3)]);
 			   break;
 		case 0x06:
+			   check_displayid_datablock_revision(x[offset + 1], 0xc0, 1);
 			   for (i = 0; i < len; i++)
 				   parse_displayid_type_4_8_timing((x[offset + 1] & 0xc0) >> 6, x[offset + 3 + i]);
 			   break;
 		case 0x07:
+			   check_displayid_datablock_revision(x[offset + 1]);
 			   for (i = 0; i < min(len, 10) * 8; i++)
 				   if (x[offset + 3 + i / 8] & (1 << (i % 8))) {
-					   print_timings("    ", find_dmt_id(i + 1), "DMT");
+					   char type[16];
+					   sprintf(type, "DMT 0x%02x", i + 1);
+					   print_timings("    ", find_dmt_id(i + 1), type);
 				   }
 			   break;
 		case 0x08:
+			   check_displayid_datablock_revision(x[offset + 1]);
 			   for (i = 0; i < min(len, 8) * 8; i++)
 				   if (x[offset + 3 + i / 8] & (1 << (i % 8))) {
-					   char suffix[16];
-					   sprintf(suffix, "VIC %3u", i + 1);
-					   print_timings("    ", find_vic_id(i + 1), suffix);
+					   char type[16];
+					   sprintf(type, "VIC %3u", i + 1);
+					   print_timings("    ", find_vic_id(i + 1), type);
 				   }
 			   break;
 		case 0x09: parse_displayid_video_timing_range_limits(x + offset); break;
@@ -1484,21 +1722,39 @@ void edid_state::parse_displayid_block(const unsigned char *x)
 		case 0x0f: parse_displayid_display_intf(x + offset); break;
 		case 0x10: parse_displayid_stereo_display_intf(x + offset); break;
 		case 0x11:
+			   check_displayid_datablock_revision(x[offset + 1]);
 			   for (i = 0; i < len / 7; i++)
 				   parse_displayid_type_5_timing(&x[offset + 3 + (i * 7)]);
 			   break;
 		case 0x12: parse_displayid_tiled_display_topology(x + offset, false); break;
 		case 0x13:
+			   check_displayid_datablock_revision(x[offset + 1]);
 			   for (i = 0; i < len; i += (x[offset + 3 + i + 2] & 0x40) ? 17 : 14)
 				   parse_displayid_type_6_timing(&x[offset + 3 + i]);
 			   break;
-		case 0x20: parse_displayid_product_id(x + offset, true); break;
+		case 0x20: parse_displayid_product_id(x + offset); break;
 		case 0x21: parse_displayid_parameters_v2(x + offset); break;
-		case 0x22:
-			   for (i = 0; i < len / 20; i++)
-				   parse_displayid_type_1_7_timing(&x[offset + 3 + i * 20], true);
+		case 0x22: {
+			   unsigned sz = 20;
+
+			   if (block_rev >= 2)
+				   check_displayid_datablock_revision(x[offset + 1], 0x08, 2);
+			   else if (block_rev == 1)
+				   check_displayid_datablock_revision(x[offset + 1], 0x08, 1);
+			   else
+				   check_displayid_datablock_revision(x[offset + 1]);
+			   sz += (x[offset + 1] & 0x70) >> 4;
+			   if (block_rev >= 1 && (x[offset + 1] & 0x08))
+				   printf("    These timings support DSC pass-through\n");
+			   for (i = 0; i < len / sz; i++)
+				   parse_displayid_type_1_7_timing(&x[offset + 3 + i * sz], true, block_rev);
 			   break;
+		}
 		case 0x23:
+			   if (block_rev)
+				   check_displayid_datablock_revision(x[offset + 1], 0xe8, 1);
+			   else
+				   check_displayid_datablock_revision(x[offset + 1], 0xc8);
 			   if (x[offset + 1] & 0x08) {
 				   for (i = 0; i < len / 2; i++)
 					   parse_displayid_type_4_8_timing((x[offset + 1] & 0xc0) >> 6,
@@ -1511,6 +1767,7 @@ void edid_state::parse_displayid_block(const unsigned char *x)
 			   }
 			   break;
 		case 0x24:
+			   check_displayid_datablock_revision(x[offset + 1]);
 			   for (i = 0; i < len / 6; i++)
 				   parse_displayid_type_9_timing(&x[offset + 3 + i * 6]);
 			   break;
@@ -1519,10 +1776,31 @@ void edid_state::parse_displayid_block(const unsigned char *x)
 		case 0x27: parse_displayid_stereo_display_intf(x + offset); break;
 		case 0x28: parse_displayid_tiled_display_topology(x + offset, true); break;
 		case 0x29: parse_displayid_ContainerID(x + offset); break;
+		case 0x32: {
+			   unsigned sz = 6 + ((x[offset + 1] & 0x70) >> 4);
+
+			   check_displayid_datablock_revision(x[offset + 1], 0x10);
+			   for (i = 0; i < len / sz; i++)
+				   parse_displayid_type_10_timing(&x[offset + 3 + i * sz]);
+			   break;
+		}
+		case 0x81: parse_displayid_cta_data_block(x + offset); break;
+		case 0x7e:
+			if (oui == 0x3a0292) {
+				parse_displayid_vesa(x + offset);
+				break;
+			}
+			// fall-through
 		default: hex_block("    ", x + offset + 3, len); break;
 		}
+
+		if ((tag == 0x00 || tag == 0x20) &&
+		    (!dispid.is_base_block || !first_data_block))
+			fail("%s is required to be the first DisplayID Data Block.\n",
+			     data_block.c_str());
 		length -= len + 3;
 		offset += len + 3;
+		first_data_block = false;
 	}
 
 	/*
@@ -1535,6 +1813,23 @@ void edid_state::parse_displayid_block(const unsigned char *x)
 
 	if (!memchk(x + 1 + x[2] + 5, 0x7f - (1 + x[2] + 5))) {
 		data_block = "Padding";
-		fail("DisplayID padding contains non-zero bytes\n");
+		fail("DisplayID padding contains non-zero bytes.\n");
 	}
+	dispid.is_base_block = false;
+}
+
+void edid_state::check_displayid_blocks()
+{
+	data_block = "DisplayID";
+	if (!dispid.has_product_identification)
+		fail("Missing DisplayID Product Identification Data Block.\n");
+	if (dispid.is_display && !dispid.has_display_parameters)
+		fail("Missing DisplayID Display Parameters Data Block.\n");
+	if (dispid.is_display && !dispid.has_display_interface_features)
+		fail("Missing DisplayID Display Interface Features Data Block.\n");
+	if (dispid.is_display && !dispid.has_type_1_7)
+		fail("Missing DisplayID Type %s Detailed Timing Data Block.\n",
+		     dispid.version >= 0x20 ? "VII" : "I");
+	if (dispid.preferred_timings.empty())
+		fail("DisplayID expects at least one preferred timing.\n");
 }
