@@ -3,7 +3,7 @@ Section: x11
 Priority: optional
 Maintainer: Andrej Shadura <andrewsh@debian.org>
 Build-Depends:
- debhelper (>= 13~),
+ debhelper-compat (= 13),
  pkg-config,
 Standards-Version: 4.1.5
 Vcs-Git: https://salsa.debian.org/debian/edid-decode.git
