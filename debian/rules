@@ -1,7 +1,10 @@
 #!/usr/bin/make -f
 
-# uncomment this to turn off verbose mode.
-#export DH_VERBOSE=1
+
+include /usr/share/dpkg/pkg-info.mk
 
 %:
-	dh "$@"
+	dh $@
+
+override_dh_auto_build:
+	dh_auto_build -- sha=-DSHA=$(lastword $(subst ., ,$(DEB_VERSION_UPSTREAM))) date=-DDATE=\""$(shell date -d@$(SOURCE_DATE_EPOCH) '+%F %T')"\"
