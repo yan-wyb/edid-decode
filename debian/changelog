@@ -1,3 +1,11 @@
+edid-decode (0.1~git20201230.95d81c9-1) unstable; urgency=medium
+
+  * New upstream release.
+  * Update the upstream URL.
+  * Pass the package version to the Makefile.
+
+ -- Andrej Shadura <andrewsh@debian.org>  Fri, 01 Jan 2021 23:30:26 +0100
+
 edid-decode (0.1~git20191209.e719d04-1) unstable; urgency=medium
 
   * New upstream snapshot (Closes: #839150):
