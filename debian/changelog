@@ -31,7 +31,7 @@ edid-decode (0.1~git20160708.c72db881-1) unstable; urgency=medium
   * Use debhelper 10.
   * Add gbp.conf.
 
- -- Andrew Shadura <andrewsh@debian.org>  Tue, 13 Dec 2016 16:43:56 +0100
+ -- Andrej Shadura <andrewsh@debian.org>  Tue, 13 Dec 2016 16:43:56 +0100
 
 edid-decode (0.1~git20140128.afcf2a2e-1) unstable; urgency=medium
 
@@ -41,7 +41,7 @@ edid-decode (0.1~git20140128.afcf2a2e-1) unstable; urgency=medium
   * Update debian/rules to use the debhelper short form.
   * Patch Makefile to use proper flags.
 
- -- Andrew Shadura <andrewsh@debian.org>  Mon, 29 Jun 2015 13:27:23 +0200
+ -- Andrej Shadura <andrewsh@debian.org>  Mon, 29 Jun 2015 13:27:23 +0200
 
 edid-decode (0.1~git20100205.26c03c8e-0ubuntu3) natty; urgency=low
 
