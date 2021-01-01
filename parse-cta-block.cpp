@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: MIT
 /*
  * Copyright 2006-2012 Red Hat, Inc.
- * Copyright 2018-2019 Cisco Systems, Inc. and/or its affiliates. All rights reserved.
+ * Copyright 2018-2020 Cisco Systems, Inc. and/or its affiliates. All rights reserved.
  *
  * Author: Adam Jackson <ajax@nwnk.net>
  * Maintainer: Hans Verkuil <hverkuil-cisco@xs4all.nl>
  */
 
 #include <stdio.h>
-#include <string.h>
 #include <math.h>
 
 #include "edid-decode.h"
@@ -191,6 +190,13 @@ static const struct timings edid_cta_modes2[] = {
 
 static const unsigned char edid_hdmi_mode_map[] = { 95, 94, 93, 98 };
 
+unsigned char hdmi_vic_to_vic(unsigned char hdmi_vic)
+{
+	if (hdmi_vic > 0 && hdmi_vic <= ARRAY_SIZE(edid_hdmi_mode_map))
+		return edid_hdmi_mode_map[hdmi_vic - 1];
+	return 0;
+}
+
 const struct timings *find_vic_id(unsigned char vic)
 {
 	if (vic > 0 && vic <= ARRAY_SIZE(edid_cta_modes1))
@@ -209,7 +215,12 @@ const struct timings *find_hdmi_vic_id(unsigned char hdmi_vic)
 
 static std::string audio_ext_format(unsigned char x)
 {
+	if (x >= 1 && x <= 3)
+		fail("Obsolete Audio Ext Format 0x%02x.\n", x);
 	switch (x) {
+	case 1: return "HE AAC (Obsolete)";
+	case 2: return "HE AAC v2 (Obsolete)";
+	case 3: return "MPEG Surround (Obsolete)";
 	case 4: return "MPEG-4 HE AAC";
 	case 5: return "MPEG-4 HE AAC v2";
 	case 6: return "MPEG-4 AAC LC";
@@ -221,7 +232,7 @@ static std::string audio_ext_format(unsigned char x)
 	case 13: return "L-PCM 3D Audio";
 	default: break;
 	}
-	fail("Unknown Audio Ext Format 0x%02x\n", x);
+	fail("Unknown Audio Ext Format 0x%02x.\n", x);
 	return std::string("Unknown Audio Ext Format (") + utohex(x) + ")";
 }
 
@@ -233,18 +244,18 @@ static std::string audio_format(unsigned char x)
 	case 3: return "MPEG 1 (Layers 1 & 2)";
 	case 4: return "MPEG 1 Layer 3 (MP3)";
 	case 5: return "MPEG2 (multichannel)";
-	case 6: return "AAC";
+	case 6: return "AAC LC";
 	case 7: return "DTS";
 	case 8: return "ATRAC";
 	case 9: return "One Bit Audio";
-	case 10: return "Dolby Digital+";
+	case 10: return "Enhanced AC-3 (DD+)";
 	case 11: return "DTS-HD";
 	case 12: return "MAT (MLP)";
 	case 13: return "DST";
 	case 14: return "WMA Pro";
 	default: break;
 	}
-	fail("Unknown Audio Format 0x%02x\n", x);
+	fail("Unknown Audio Format 0x%02x.\n", x);
 	return std::string("Unknown Audio Format (") + utohex(x) + ")";
 }
 
@@ -259,40 +270,45 @@ static std::string mpeg_h_3d_audio_level(unsigned char x)
 	case 5: return "Level 5";
 	default: break;
 	}
-	fail("Unknown MPEG-H 3D Audio Level 0x%02x\n", x);
+	fail("Unknown MPEG-H 3D Audio Level 0x%02x.\n", x);
 	return std::string("Unknown MPEG-H 3D Audio Level (") + utohex(x) + ")";
 }
 
 static void cta_audio_block(const unsigned char *x, unsigned length)
 {
-	unsigned i, format, ext_format = 0;
+	unsigned i, format, ext_format;
 
 	if (length % 3) {
-		fail("Broken CTA audio block length %d\n", length);
+		fail("Broken CTA-861 audio block length %d.\n", length);
 		return;
 	}
 
 	for (i = 0; i < length; i += 3) {
 		format = (x[i] & 0x78) >> 3;
-		ext_format = (x[i + 2] & 0xf8) >> 3;
 		if (format == 0) {
 			printf("    Reserved (0x00)\n");
-			fail("Audio Format Code 0x00 is reserved\n");
+			fail("Audio Format Code 0x00 is reserved.\n");
 			continue;
 		}
+		if (format != 15) {
+			ext_format = 0;
+			printf("    %s:\n", audio_format(format).c_str());
+		} else {
+			ext_format = (x[i + 2] & 0xf8) >> 3;
+			printf("    %s:\n", audio_ext_format(ext_format).c_str());
+		}
 		if (format != 15)
-			printf("    %s, max channels %u\n", audio_format(format).c_str(),
-			       (x[i] & 0x07)+1);
+			printf("      Max channels: %u\n", (x[i] & 0x07)+1);
 		else if (ext_format == 11)
-			printf("    %s, MPEG-H 3D Audio Level: %s\n", audio_ext_format(ext_format).c_str(),
+			printf("      MPEG-H 3D Audio Level: %s\n",
 			       mpeg_h_3d_audio_level(x[i] & 0x07).c_str());
 		else if (ext_format == 13)
-			printf("    %s, max channels %u\n", audio_ext_format(ext_format).c_str(),
+			printf("      Max channels: %u\n",
 			       (((x[i + 1] & 0x80) >> 3) | ((x[i] & 0x80) >> 4) |
 				(x[i] & 0x07))+1);
 		else
-			printf("    %s, max channels %u\n", audio_ext_format(ext_format).c_str(),
-			       (x[i] & 0x07)+1);
+			printf("      Max channels: %u\n", (x[i] & 0x07)+1);
+
 		printf("      Supported sample rates (kHz):%s%s%s%s%s%s%s\n",
 		       (x[i+1] & 0x40) ? " 192" : "",
 		       (x[i+1] & 0x20) ? " 176.4" : "",
@@ -311,12 +327,22 @@ static void cta_audio_block(const unsigned char *x, unsigned length)
 		} else if (format == 10) {
 			// As specified by the "Dolby Audio and Dolby Atmos over HDMI"
 			// specification (v1.0).
-			if(x[i+2] & 1)
+			if (x[i+2] & 1)
 				printf("      Supports Joint Object Coding\n");
-			if(x[i+2] & 2)
+			if (x[i+2] & 2)
 				printf("      Supports Joint Object Coding with ACMOD28\n");
+		} else if (format == 12) {
+			if (x[i+2] & 1) {
+				printf("      Supports Dolby TrueHD, object audio PCM and channel-based PCM\n");
+				printf("      Hash calculation %srequired for object audio PCM or channel-based PCM\n",
+				       (x[i+2] & 2) ? "not " : "");
+			} else {
+				printf("      Supports only Dolby TrueHD\n");
+			}
 		} else if (format == 14) {
 			printf("      Profile: %u\n", x[i+2] & 7);
+		} else if (format >= 9 && format <= 13) {
+			printf("      Audio Format Code dependent value: 0x%02x\n", x[i+2]);
 		} else if (ext_format == 11 && (x[i+2] & 1)) {
 			printf("      Supports MPEG-H 3D Audio Low Complexity Profile\n");
 		} else if ((ext_format >= 4 && ext_format <= 6) ||
@@ -333,9 +359,8 @@ static void cta_audio_block(const unsigned char *x, unsigned length)
 	}
 }
 
-void edid_state::cta_svd(const unsigned char *x, unsigned n, int for_ycbcr420)
+void edid_state::cta_svd(const unsigned char *x, unsigned n, bool for_ycbcr420)
 {
-	static unsigned short vics[256][2];
 	unsigned i;
 
 	for (i = 0; i < n; i++)  {
@@ -359,51 +384,78 @@ void edid_state::cta_svd(const unsigned char *x, unsigned n, int for_ycbcr420)
 		if (t) {
 			switch (vic) {
 			case 95:
-				supported_hdmi_vic_vsb_codes |= 1 << 0;
+				cta.supported_hdmi_vic_vsb_codes |= 1 << 0;
 				break;
 			case 94:
-				supported_hdmi_vic_vsb_codes |= 1 << 1;
+				cta.supported_hdmi_vic_vsb_codes |= 1 << 1;
 				break;
 			case 93:
-				supported_hdmi_vic_vsb_codes |= 1 << 2;
+				cta.supported_hdmi_vic_vsb_codes |= 1 << 2;
 				break;
 			case 98:
-				supported_hdmi_vic_vsb_codes |= 1 << 3;
+				cta.supported_hdmi_vic_vsb_codes |= 1 << 3;
 				break;
 			}
-			char suffix[16];
+			bool first_svd = cta.first_svd && !for_ycbcr420;
+			bool override_pref = first_svd && cta.first_svd_might_be_preferred;
 
-			sprintf(suffix, "VIC %3u%s", vic, native ? ", native" : "");
-			print_timings("    ", t, suffix);
+			char type[16];
+			sprintf(type, "VIC %3u", vic);
+			const char *flags = native ? "native" : "";
+
+			if (for_ycbcr420) {
+				struct timings tmp = *t;
+				tmp.ycbcr420 = true;
+				print_timings("    ", &tmp, type, flags);
+			} else {
+				print_timings("    ", t, type, flags);
+			}
+			if (override_pref) {
+				cta.preferred_timings.insert(cta.preferred_timings.begin(),
+							     timings_ext(*t, type, flags));
+				warn("VIC %u is the preferred timing, overriding the first detailed timings. Is this intended?\n", vic);
+			} else if (first_svd) {
+				cta.preferred_timings.push_back(timings_ext(*t, type, flags));
+			}
+			if (first_svd) {
+				cta.first_svd = false;
+				cta.first_svd_might_be_preferred = false;
+			}
+			if (native)
+				cta.native_timings.push_back(timings_ext(*t, type, flags));
 		} else {
 			printf("    Unknown (VIC %3u)\n", vic);
-			fail("Unknown VIC %u\n", vic);
+			fail("Unknown VIC %u.\n", vic);
 		}
 
 		if (vic == 1 && !for_ycbcr420)
-			has_cta861_vic_1 = 1;
-		if (++vics[vic][for_ycbcr420] == 2)
-			fail("Duplicate %sVIC %u\n", for_ycbcr420 ? "YCbCr 4:2:0 " : "", vic);
-		if (for_ycbcr420 && preparsed_has_vic[0][vic])
-			fail("YCbCr 4:2:0-only VIC %u is also a regular VIC\n", vic);
+			cta.has_vic_1 = 1;
+		if (++cta.vics[vic][for_ycbcr420] == 2)
+			fail("Duplicate %sVIC %u.\n", for_ycbcr420 ? "YCbCr 4:2:0 " : "", vic);
+		if (for_ycbcr420 && cta.preparsed_has_vic[0][vic])
+			fail("YCbCr 4:2:0-only VIC %u is also a regular VIC.\n", vic);
 	}
 }
 
-void edid_state::print_vic_index(const char *prefix, unsigned idx, const char *suffix)
+void edid_state::print_vic_index(const char *prefix, unsigned idx, const char *suffix, bool ycbcr420)
 {
 	if (!suffix)
 		suffix = "";
-	if (idx < preparsed_svds[0].size()) {
-		unsigned char vic = preparsed_svds[0][idx];
+	if (idx < cta.preparsed_svds[0].size()) {
+		unsigned char vic = cta.preparsed_svds[0][idx];
 		const struct timings *t = find_vic_id(vic);
-		char buf[256];
+		char buf[16];
 
-		sprintf(buf, "VIC %3u%s%s", vic, *suffix ? ", " : "", suffix);
+		sprintf(buf, "VIC %3u", vic);
 
-		if (t)
-			print_timings(prefix, t, buf);
-		else 
-			printf("%sUnknown (%s)\n", prefix, buf);
+		if (t) {
+			struct timings tmp = *t;
+			tmp.ycbcr420 = ycbcr420;
+			print_timings(prefix, &tmp, buf, suffix);
+		} else {
+			printf("%sUnknown (%s%s%s)\n", prefix, buf,
+			       *suffix ? ", " : "", suffix);
+		}
 	} else {
 		// Should not happen!
 		printf("%sSVD Index %u is out of range", prefix, idx + 1);
@@ -425,7 +477,7 @@ void edid_state::cta_y420cmdb(const unsigned char *x, unsigned length)
 
 	if (memchk(x, length)) {
 		printf("    Empty Capability Map\n");
-		fail("Empty Capability Map\n");
+		fail("Empty Capability Map.\n");
 		return;
 	}
 
@@ -437,29 +489,34 @@ void edid_state::cta_y420cmdb(const unsigned char *x, unsigned length)
 			if (!(v & (1 << j)))
 				continue;
 
-			print_vic_index("    ", i * 8 + j, "");
+			print_vic_index("    ", i * 8 + j, "", true);
 			max_idx = i * 8 + j;
-			if (max_idx < preparsed_svds[0].size()) {
-				unsigned vic = preparsed_svds[0][max_idx];
-				if (preparsed_has_vic[1][vic])
-					fail("VIC %u is also a YCbCr 4:2:0-only VIC\n", vic);
+			if (max_idx < cta.preparsed_svds[0].size()) {
+				unsigned vic = cta.preparsed_svds[0][max_idx];
+				if (cta.preparsed_has_vic[1][vic])
+					fail("VIC %u is also a YCbCr 4:2:0-only VIC.\n", vic);
 			}
 		}
 	}
-	if (max_idx >= preparsed_svds[0].size())
-		fail("Max index %u > %u (#SVDs)\n",
-		     max_idx + 1, preparsed_svds[0].size());
+	if (max_idx >= cta.preparsed_svds[0].size())
+		fail("Max index %u > %u (#SVDs).\n",
+		     max_idx + 1, cta.preparsed_svds[0].size());
 }
 
 void edid_state::cta_vfpdb(const unsigned char *x, unsigned length)
 {
 	unsigned i;
 
+	if (length == 0) {
+		fail("Empty Data Block with length %u.\n", length);
+		return;
+	}
+	cta.preferred_timings.clear();
 	for (i = 0; i < length; i++)  {
 		unsigned char svr = x[i];
+		char suffix[16];
 
 		if ((svr > 0 && svr < 128) || (svr > 192 && svr < 254)) {
-			char suffix[16];
 			const struct timings *t;
 			unsigned char vic = svr;
 
@@ -468,13 +525,39 @@ void edid_state::cta_vfpdb(const unsigned char *x, unsigned length)
 			t = find_vic_id(vic);
 			if (t) {
 				print_timings("    ", t, suffix);
+				cta.preferred_timings.push_back(timings_ext(*t, suffix, ""));
 			} else {
-				printf("    Unknown (VIC %3u)\n", vic);
-				fail("Unknown VIC %u\n", vic);
+				printf("    %s: Unknown\n", suffix);
+				fail("Unknown VIC %u.\n", vic);
 			}
 
-		} else if (svr > 128 && svr < 145) {
-			printf("    DTD number %02u\n", svr - 128);
+		} else if (svr >= 129 && svr <= 144) {
+			sprintf(suffix, "DTD %3u", svr - 128);
+			if (svr >= cta.preparse_total_dtds + 129) {
+				printf("    %s: Invalid\n", suffix);
+				fail("Invalid DTD %u.\n", svr - 128);
+			} else {
+				printf("    %s\n", suffix);
+				cta.preferred_timings.push_back(timings_ext(svr, suffix));
+			}
+		} else if (svr >= 145 && svr <= 160) {
+			sprintf(suffix, "VTDB %3u", svr - 144);
+			if (svr >= cta.preparse_total_vtdbs + 145) {
+				printf("    %s: Invalid\n", suffix);
+				fail("Invalid VTDB %u.\n", svr - 144);
+			} else {
+				printf("    %s\n", suffix);
+				cta.preferred_timings.push_back(timings_ext(svr, suffix));
+			}
+		} else if (svr == 254) {
+			sprintf(suffix, "T8VTDB");
+			if (!cta.preparse_has_t8vtdb) {
+				printf("    %s: Invalid\n", suffix);
+				fail("Invalid T8VTDB.\n");
+			} else {
+				printf("    %s\n", suffix);
+				cta.preferred_timings.push_back(timings_ext(svr, suffix));
+			}
 		}
 	}
 }
@@ -492,8 +575,11 @@ void edid_state::cta_hdmi_block(const unsigned char *x, unsigned length)
 {
 	unsigned len_vic, len_3d;
 
-	printf(" (HDMI)\n");
-	printf("    Source physical address %u.%u.%u.%u\n", x[3] >> 4, x[3] & 0x0f,
+	if (length < 4) {
+		fail("Empty Data Block with length %u.\n", length);
+		return;
+	}
+	printf("    Source physical address: %u.%u.%u.%u\n", x[3] >> 4, x[3] & 0x0f,
 	       x[4] >> 4, x[4] & 0x0f);
 
 	if (length < 6)
@@ -518,7 +604,7 @@ void edid_state::cta_hdmi_block(const unsigned char *x, unsigned length)
 
 	printf("    Maximum TMDS clock: %u MHz\n", x[6] * 5);
 	if (x[6] * 5 > 340)
-		fail("HDMI VSDB Max TMDS rate is > 340\n");
+		fail("HDMI VSDB Max TMDS rate is > 340.\n");
 
 	if (length < 8)
 		return;
@@ -576,10 +662,10 @@ void edid_state::cta_hdmi_block(const unsigned char *x, unsigned length)
 		   break;
 	case 0x18:
 		   printf("      Base EDID image size is in units of 5 cm\n");
-		   max_display_width_mm *= 5;
-		   max_display_height_mm *= 5;
+		   base.max_display_width_mm *= 5;
+		   base.max_display_height_mm *= 5;
 		   printf("        Recalculated image size: %u cm x %u cm\n",
-			  max_display_width_mm / 10, max_display_height_mm / 10);
+			  base.max_display_width_mm / 10, base.max_display_height_mm / 10);
 		   break;
 	}
 	b++;
@@ -597,131 +683,133 @@ void edid_state::cta_hdmi_block(const unsigned char *x, unsigned length)
 
 			if (vic && vic <= ARRAY_SIZE(edid_hdmi_mode_map)) {
 				std::string suffix = "HDMI VIC " + std::to_string(vic);
-				supported_hdmi_vic_codes |= 1 << (vic - 1);
+				cta.supported_hdmi_vic_codes |= 1 << (vic - 1);
 				t = find_vic_id(edid_hdmi_mode_map[vic - 1]);
 				print_timings("        ", t, suffix.c_str());
 			} else {
 				printf("         Unknown (HDMI VIC %u)\n", vic);
-				fail("Unknown HDMI VIC %u\n", vic);
+				fail("Unknown HDMI VIC %u.\n", vic);
 			}
 		}
 
 		b += len_vic;
 	}
 
-	if (len_3d) {
-		if (formats) {
-			/* 3D_Structure_ALL_15..8 */
-			if (x[b] & 0x80)
-				printf("      3D: Side-by-side (half, quincunx)\n");
-			if (x[b] & 0x01)
-				printf("      3D: Side-by-side (half, horizontal)\n");
-			/* 3D_Structure_ALL_7..0 */
-			b++;
-			if (x[b] & 0x40)
-				printf("      3D: Top-and-bottom\n");
-			if (x[b] & 0x20)
-				printf("      3D: L + depth + gfx + gfx-depth\n");
-			if (x[b] & 0x10)
-				printf("      3D: L + depth\n");
-			if (x[b] & 0x08)
-				printf("      3D: Side-by-side (full)\n");
-			if (x[b] & 0x04)
-				printf("      3D: Line-alternative\n");
-			if (x[b] & 0x02)
-				printf("      3D: Field-alternative\n");
-			if (x[b] & 0x01)
-				printf("      3D: Frame-packing\n");
-			b++;
-			len_3d -= 2;
-		}
+	if (!len_3d)
+		return;
 
-		if (mask) {
-			int max_idx = -1;
-			unsigned i;
-
-			printf("      3D VIC indices that support these capabilities:\n");
-			/* worst bit ordering ever */
-			for (i = 0; i < 8; i++)
-				if (x[b + 1] & (1 << i)) {
-					print_vic_index("        ", i, "");
-					max_idx = i;
-				}
-			for (i = 0; i < 8; i++)
-				if (x[b] & (1 << i)) {
-					print_vic_index("        ", i + 8, "");
-					max_idx = i + 8;
-				}
-			b += 2;
-			len_3d -= 2;
-			if (max_idx >= (int)preparsed_svds[0].size())
-				fail("HDMI 3D VIC indices max index %d > %u (#SVDs)\n",
-				     max_idx + 1, preparsed_svds[0].size());
-		}
-
-		/*
-		 * list of nibbles:
-		 * 2D_VIC_Order_X
-		 * 3D_Structure_X
-		 * (optionally: 3D_Detail_X and reserved)
-		 */
-		if (len_3d > 0) {
-			unsigned end = b + len_3d;
-		int max_idx = -1;
-
-			printf("      3D VIC indices with specific capabilities:\n");
-			while (b < end) {
-				unsigned char idx = x[b] >> 4;
-				std::string s;
-
-				if (idx > max_idx)
-					max_idx = idx;
-				switch (x[b] & 0x0f) {
-				case 0: s = "frame packing"; break;
-				case 1: s = "field alternative"; break;
-				case 2: s = "line alternative"; break;
-				case 3: s = "side-by-side (full)"; break;
-				case 4: s = "L + depth"; break;
-				case 5: s = "L + depth + gfx + gfx-depth"; break;
-				case 6: s = "top-and-bottom"; break;
-				case 8:
-					s = "side-by-side";
-					switch (x[b + 1] >> 4) {
-					case 0x00: break;
-					case 0x01: s += ", horizontal"; break;
-					case 0x02: case 0x03: case 0x04: case 0x05:
-						   s += ", not in use";
-						   fail("not-in-use 3D_Detail_X value 0x%02x\n",
-							x[b + 1] >> 4);
-						   break;
-					case 0x06: s += ", all quincunx combinations"; break;
-					case 0x07: s += ", quincunx odd/left, odd/right"; break;
-					case 0x08: s += ", quincunx odd/left, even/right"; break;
-					case 0x09: s += ", quincunx even/left, odd/right"; break;
-					case 0x0a: s += ", quincunx even/left, even/right"; break;
-					default:
-						   s += ", reserved";
-						   fail("reserved 3D_Detail_X value 0x%02x\n",
-							x[b + 1] >> 4);
-						   break;
-					}
-					break;
-				default:
-					s = "unknown (";
-					s += utohex(x[b] & 0x0f) + ")";
-					fail("Unknown 3D_Structure_X value 0x%02x\n", x[b] & 0x0f);
-					break;
-				}
-				print_vic_index("        ", idx, s.c_str());
-				if ((x[b] & 0x0f) >= 8)
-					b++;
-				b++;
-			}
-			if (max_idx >= (int)preparsed_svds[0].size())
-				fail("HDMI 2D VIC indices max index %d > %u (#SVDs)\n",
-				     max_idx + 1, preparsed_svds[0].size());
-		}
+	if (formats) {
+		/* 3D_Structure_ALL_15..8 */
+		if (x[b] & 0x80)
+			printf("      3D: Side-by-side (half, quincunx)\n");
+		if (x[b] & 0x01)
+			printf("      3D: Side-by-side (half, horizontal)\n");
+		/* 3D_Structure_ALL_7..0 */
+		b++;
+		if (x[b] & 0x40)
+			printf("      3D: Top-and-bottom\n");
+		if (x[b] & 0x20)
+			printf("      3D: L + depth + gfx + gfx-depth\n");
+		if (x[b] & 0x10)
+			printf("      3D: L + depth\n");
+		if (x[b] & 0x08)
+			printf("      3D: Side-by-side (full)\n");
+		if (x[b] & 0x04)
+			printf("      3D: Line-alternative\n");
+		if (x[b] & 0x02)
+			printf("      3D: Field-alternative\n");
+		if (x[b] & 0x01)
+			printf("      3D: Frame-packing\n");
+		b++;
+		len_3d -= 2;
 	}
+
+	if (mask) {
+		int max_idx = -1;
+		unsigned i;
+
+		printf("      3D VIC indices that support these capabilities:\n");
+		/* worst bit ordering ever */
+		for (i = 0; i < 8; i++)
+			if (x[b + 1] & (1 << i)) {
+				print_vic_index("        ", i, "");
+				max_idx = i;
+			}
+		for (i = 0; i < 8; i++)
+			if (x[b] & (1 << i)) {
+				print_vic_index("        ", i + 8, "");
+				max_idx = i + 8;
+			}
+		b += 2;
+		len_3d -= 2;
+		if (max_idx >= (int)cta.preparsed_svds[0].size())
+			fail("HDMI 3D VIC indices max index %d > %u (#SVDs).\n",
+			     max_idx + 1, cta.preparsed_svds[0].size());
+	}
+
+	/*
+	 * list of nibbles:
+	 * 2D_VIC_Order_X
+	 * 3D_Structure_X
+	 * (optionally: 3D_Detail_X and reserved)
+	 */
+	if (!len_3d)
+		return;
+
+	unsigned end = b + len_3d;
+	int max_idx = -1;
+
+	printf("      3D VIC indices with specific capabilities:\n");
+	while (b < end) {
+		unsigned char idx = x[b] >> 4;
+		std::string s;
+
+		if (idx > max_idx)
+			max_idx = idx;
+		switch (x[b] & 0x0f) {
+		case 0: s = "frame packing"; break;
+		case 1: s = "field alternative"; break;
+		case 2: s = "line alternative"; break;
+		case 3: s = "side-by-side (full)"; break;
+		case 4: s = "L + depth"; break;
+		case 5: s = "L + depth + gfx + gfx-depth"; break;
+		case 6: s = "top-and-bottom"; break;
+		case 8:
+			s = "side-by-side";
+			switch (x[b + 1] >> 4) {
+			case 0x00: s += ", any subsampling"; break;
+			case 0x01: s += ", horizontal"; break;
+			case 0x02: case 0x03: case 0x04: case 0x05:
+				   s += ", not in use";
+				   fail("not-in-use 3D_Detail_X value 0x%02x.\n",
+					x[b + 1] >> 4);
+				   break;
+			case 0x06: s += ", all quincunx combinations"; break;
+			case 0x07: s += ", quincunx odd/left, odd/right"; break;
+			case 0x08: s += ", quincunx odd/left, even/right"; break;
+			case 0x09: s += ", quincunx even/left, odd/right"; break;
+			case 0x0a: s += ", quincunx even/left, even/right"; break;
+			default:
+				   s += ", reserved";
+				   fail("reserved 3D_Detail_X value 0x%02x.\n",
+					x[b + 1] >> 4);
+				   break;
+			}
+			break;
+		default:
+			s = "unknown (";
+			s += utohex(x[b] & 0x0f) + ")";
+			fail("Unknown 3D_Structure_X value 0x%02x.\n", x[b] & 0x0f);
+			break;
+		}
+		print_vic_index("        ", idx, s.c_str());
+		if ((x[b] & 0x0f) >= 8)
+			b++;
+		b++;
+	}
+	if (max_idx >= (int)cta.preparsed_svds[0].size())
+		fail("HDMI 2D VIC indices max index %d > %u (#SVDs).\n",
+		     max_idx + 1, cta.preparsed_svds[0].size());
 }
 
 static const char *max_frl_rates[] = {
@@ -749,7 +837,7 @@ static void cta_hf_eeodb(const unsigned char *x, unsigned length)
 {
 	printf("    EDID Extension Block Count: %u\n", x[0]);
 	if (length != 1 || x[0] == 0)
-		fail("Block is too long or reports a 0 block count\n");
+		fail("Block is too long or reports a 0 block count.\n");
 }
 
 static void cta_hf_scdb(const unsigned char *x, unsigned length)
@@ -759,8 +847,8 @@ static void cta_hf_scdb(const unsigned char *x, unsigned length)
 	printf("    Version: %u\n", x[0]);
 	if (rate) {
 		printf("    Maximum TMDS Character Rate: %u MHz\n", rate);
-		if ((rate && rate <= 340) || rate > 600)
-			fail("Max TMDS rate is > 0 and <= 340 or > 600\n");
+		if (rate <= 340 || rate > 600)
+			fail("Max TMDS rate is > 0 and <= 340 or > 600.\n");
 	}
 	if (x[2] & 0x80)
 		printf("    SCDC Present\n");
@@ -784,12 +872,12 @@ static void cta_hf_scdb(const unsigned char *x, unsigned length)
 			printf("%s\n", max_frl_rates[max_frl_rate]);
 		} else {
 			printf("Unknown (0x%02x)\n", max_frl_rate);
-			fail("Unknown Max Fixed Rate Link (0x%02x)\n", max_frl_rate);
+			fail("Unknown Max Fixed Rate Link (0x%02x).\n", max_frl_rate);
 		}
 		if (max_frl_rate == 1 && rate < 300)
-			fail("Max Fixed Rate Link is 1, but Max TMDS rate < 300\n");
+			fail("Max Fixed Rate Link is 1, but Max TMDS rate < 300.\n");
 		else if (max_frl_rate >= 2 && rate < 600)
-			fail("Max Fixed Rate Link is >= 2, but Max TMDS rate < 600\n");
+			fail("Max Fixed Rate Link is >= 2, but Max TMDS rate < 600.\n");
 	}
 	if (x[3] & 0x08)
 		printf("    Supports UHD VIC\n");
@@ -800,7 +888,7 @@ static void cta_hf_scdb(const unsigned char *x, unsigned length)
 	if (x[3] & 0x01)
 		printf("    Supports 10-bits/component Deep Color 4:2:0 Pixel Encoding\n");
 
-	if (length <= 7)
+	if (length <= 4)
 		return;
 
 	if (x[4] & 0x20)
@@ -816,13 +904,13 @@ static void cta_hf_scdb(const unsigned char *x, unsigned length)
 	if (x[4] & 0x01)
 		printf("    Supports a FAPA in blanking after first active video line\n");
 
-	if (length <= 8)
+	if (length <= 5)
 		return;
 
-	printf("    VRRmin: %d Hz\n", x[8] & 0x3f);
-	printf("    VRRmax: %d Hz\n", (x[8] & 0xc0) << 2 | x[9]);
+	printf("    VRRmin: %d Hz\n", x[5] & 0x3f);
+	printf("    VRRmax: %d Hz\n", (x[5] & 0xc0) << 2 | x[6]);
 
-	if (length <= 10)
+	if (length <= 7)
 		return;
 
 	if (x[7] & 0x80)
@@ -845,7 +933,7 @@ static void cta_hf_scdb(const unsigned char *x, unsigned length)
 			printf("%s\n", dsc_max_slices[max_slices]);
 		} else {
 			printf("Unknown (0x%02x)\n", max_slices);
-			fail("Unknown DSC Max Slices (0x%02x)\n", max_slices);
+			fail("Unknown DSC Max Slices (0x%02x).\n", max_slices);
 		}
 	}
 	if (x[8] & 0xf0) {
@@ -856,7 +944,7 @@ static void cta_hf_scdb(const unsigned char *x, unsigned length)
 			printf("%s\n", max_frl_rates[max_frl_rate]);
 		} else {
 			printf("Unknown (0x%02x)\n", max_frl_rate);
-			fail("Unknown DSC Max Fixed Rate Link (0x%02x)\n", max_frl_rate);
+			fail("Unknown DSC Max Fixed Rate Link (0x%02x).\n", max_frl_rate);
 		}
 	}
 	if (x[9] & 0x3f)
@@ -867,7 +955,148 @@ static void cta_hf_scdb(const unsigned char *x, unsigned length)
 static void cta_hdr10plus(const unsigned char *x, unsigned length)
 {
 	printf("    Application Version: %u", x[0]);
-	hex_block("  ", x + 1, length - 1);
+	if (length > 1)
+		hex_block("  ", x + 1, length - 1);
+	else
+		printf("\n");
+}
+
+static void cta_dolby_video(const unsigned char *x, unsigned length)
+{
+	unsigned char version = (x[0] >> 5) & 0x07;
+
+	printf("    Version: %u (%u bytes)\n", version, length + 5);
+	if (x[0] & 0x01)
+		printf("    Supports YUV422 12 bit\n");
+
+	if (version == 0) {
+		if (x[0] & 0x02)
+			printf("    Supports 2160p60\n");
+		if (x[0] & 0x04)
+			printf("    Supports global dimming\n");
+		unsigned char dm_version = x[16];
+		printf("    DM Version: %u.%u\n", dm_version >> 4, dm_version & 0xf);
+		printf("    Target Min PQ: %u\n", (x[14] << 4) | (x[13] >> 4));
+		printf("    Target Max PQ: %u\n", (x[15] << 4) | (x[13] & 0xf));
+		printf("    Rx, Ry: %.8f, %.8f\n",
+		       ((x[1] >> 4) | (x[2] << 4)) / 4096.0,
+		       ((x[1] & 0xf) | (x[3] << 4)) / 4096.0);
+		printf("    Gx, Gy: %.8f, %.8f\n",
+		       ((x[4] >> 4) | (x[5] << 4)) / 4096.0,
+		       ((x[4] & 0xf) | (x[6] << 4)) / 4096.0);
+		printf("    Bx, By: %.8f, %.8f\n",
+		       ((x[7] >> 4) | (x[8] << 4)) / 4096.0,
+		       ((x[7] & 0xf) | (x[9] << 4)) / 4096.0);
+		printf("    Wx, Wy: %.8f, %.8f\n",
+		       ((x[10] >> 4) | (x[11] << 4)) / 4096.0,
+		       ((x[10] & 0xf) | (x[12] << 4)) / 4096.0);
+		return;
+	}
+
+	if (version == 1) {
+		if (x[0] & 0x02)
+			printf("    Supports 2160p60\n");
+		if (x[1] & 0x01)
+			printf("    Supports global dimming\n");
+		unsigned char dm_version = (x[0] >> 2) & 0x07;
+		printf("    DM Version: %u.x\n", dm_version + 2);
+		printf("    Colorimetry: %s\n", (x[2] & 0x01) ? "P3-D65" : "ITU-R BT.709");
+		printf("    Low Latency: %s\n", (x[3] & 0x01) ? "Standard + Low Latency" : "Only Standard");
+		printf("    Target Max Luminance: %u cd/m^2\n", 100 + (x[1] >> 1) * 50);
+		double lm = (x[2] >> 1) / 127.0;
+		printf("    Target Min Luminance: %.8f cd/m^2\n", lm * lm);
+		if (length == 10) {
+			printf("    Rx, Ry: %.8f, %.8f\n", x[4] / 256.0, x[5] / 256.0);
+			printf("    Gx, Gy: %.8f, %.8f\n", x[6] / 256.0, x[7] / 256.0);
+			printf("    Bx, By: %.8f, %.8f\n", x[8] / 256.0, x[9] / 256.0);
+		} else {
+			double xmin = 0.625;
+			double xstep = (0.74609375 - xmin) / 31.0;
+			double ymin = 0.25;
+			double ystep = (0.37109375 - ymin) / 31.0;
+
+			printf("    Unique Rx, Ry: %.8f, %.8f\n",
+			       xmin + xstep * (x[6] >> 3),
+			       ymin + ystep * (((x[6] & 0x7) << 2) | (x[4] & 0x01) | ((x[5] & 0x01) << 1)));
+			xstep = 0.49609375 / 127.0;
+			ymin = 0.5;
+			ystep = (0.99609375 - ymin) / 127.0;
+			printf("    Unique Gx, Gy: %.8f, %.8f\n",
+			       xstep * (x[4] >> 1), ymin + ystep * (x[5] >> 1));
+			xmin = 0.125;
+			xstep = (0.15234375 - xmin) / 7.0;
+			ymin = 0.03125;
+			ystep = (0.05859375 - ymin) / 7.0;
+			printf("    Unique Bx, By: %.8f, %.8f\n",
+			       xmin + xstep * (x[3] >> 5),
+			       ymin + ystep * ((x[3] >> 2) & 0x07));
+		}
+		return;
+	}
+
+	if (version == 2) {
+		if (x[0] & 0x02)
+			printf("    Supports Backlight Control\n");
+		if (x[1] & 0x04)
+			printf("    Supports global dimming\n");
+		unsigned char dm_version = (x[0] >> 2) & 0x07;
+		printf("    DM Version: %u.x\n", dm_version + 2);
+		printf("    Backlt Min Luma: %u cd/m^2\n", 25 + (x[1] & 0x03) * 25);
+		printf("    Interface: ");
+		switch (x[2] & 0x03) {
+		case 0: printf("Low-Latency\n"); break;
+		case 1: printf("Low-Latency + Low-Latency-HDMI\n"); break;
+		case 2: printf("Standard + Low-Latency\n"); break;
+		case 3: printf("Standard + Low-Latency + Low-Latency-HDMI\n"); break;
+		}
+		printf("    Supports 10b 12b 444: ");
+		switch ((x[3] & 0x01) << 1 | (x[4] & 0x01)) {
+		case 0: printf("Not supported\n"); break;
+		case 1: printf("10 bit\n"); break;
+		case 2: printf("12 bit\n"); break;
+		case 3: printf("Reserved\n"); break;
+		}
+		printf("    Target Min PQ v2: %u\n", 20 * (x[1] >> 3));
+		printf("    Target Max PQ v2: %u\n", 2055 + 65 * (x[2] >> 3));
+
+		double xmin = 0.625;
+		double xstep = (0.74609375 - xmin) / 31.0;
+		double ymin = 0.25;
+		double ystep = (0.37109375 - ymin) / 31.0;
+
+		printf("    Unique Rx, Ry: %.8f, %.8f\n",
+		       xmin + xstep * (x[5] >> 3),
+		       ymin + ystep * (x[6] >> 3));
+		xstep = 0.49609375 / 127.0;
+		ymin = 0.5;
+		ystep = (0.99609375 - ymin) / 127.0;
+		printf("    Unique Gx, Gy: %.8f, %.8f\n",
+		       xstep * (x[3] >> 1), ymin + ystep * (x[4] >> 1));
+		xmin = 0.125;
+		xstep = (0.15234375 - xmin) / 7.0;
+		ymin = 0.03125;
+		ystep = (0.05859375 - ymin) / 7.0;
+		printf("    Unique Bx, By: %.8f, %.8f\n",
+		       xmin + xstep * (x[5] & 0x07),
+		       ymin + ystep * (x[6] & 0x07));
+	}
+}
+
+static void cta_dolby_audio(const unsigned char *x, unsigned length)
+{
+	unsigned char version = 1 + (x[0] & 0x07);
+
+	printf("    Version: %u (%u bytes)\n", version, length + 5);
+	if (x[0] & 0x80)
+		printf("    Headphone playback only\n");
+	if (x[0] & 0x40)
+		printf("    Height speaker zone present\n");
+	if (x[0] & 0x20)
+		printf("    Surround speaker zone present\n");
+	if (x[0] & 0x10)
+		printf("    Center speaker zone present\n");
+	if (x[1] & 0x01)
+		printf("    Supports Dolby MAT PCM decoding at 48 kHz only, does not support TrueHD\n");
 }
 
 static const char *speaker_map[] = {
@@ -899,17 +1128,201 @@ static void cta_sadb(const unsigned char *x, unsigned length)
 	unsigned sad;
 	unsigned i;
 
-	if (length < 3)
+	if (length < 3) {
+		fail("Empty Data Block with length %u.\n", length);
 		return;
+	}
 
 	sad = ((x[2] << 16) | (x[1] << 8) | x[0]);
 
-	printf("    Speaker map:\n");
-
 	for (i = 0; i < ARRAY_SIZE(speaker_map); i++) {
 		if ((sad >> i) & 1)
-			printf("      %s\n", speaker_map[i]);
+			printf("    %s\n", speaker_map[i]);
 	}
+}
+
+static void cta_vesa_dtcdb(const unsigned char *x, unsigned length)
+{
+	if (length != 7 && length != 15 && length != 31) {
+		fail("Invalid length %u.\n", length);
+		return;
+	}
+
+	switch (x[0] >> 6) {
+	case 0: printf("    White"); break;
+	case 1: printf("    Red"); break;
+	case 2: printf("    Green"); break;
+	case 3: printf("    Blue"); break;
+	}
+	unsigned v = x[0] & 0x3f;
+	printf(" transfer characteristics: %u", v);
+	for (unsigned i = 1; i < length; i++)
+		printf(" %u", v += x[i]);
+	printf(" 1023\n");
+}
+
+static void cta_vesa_vdddb(const unsigned char *x, unsigned length)
+{
+	if (length != 30) {
+		fail("Invalid length %u.\n", length);
+		return;
+	}
+
+	printf("    Interface Type: ");
+	unsigned char v = x[0];
+	switch (v >> 4) {
+	case 0: printf("Analog (");
+		switch (v & 0xf) {
+		case 0: printf("15HD/VGA"); break;
+		case 1: printf("VESA NAVI-V (15HD)"); break;
+		case 2: printf("VESA NAVI-D"); break;
+		default: printf("Reserved"); break;
+		}
+		printf(")\n");
+		break;
+	case 1: printf("LVDS %u lanes", v & 0xf); break;
+	case 2: printf("RSDS %u lanes", v & 0xf); break;
+	case 3: printf("DVI-D %u channels", v & 0xf); break;
+	case 4: printf("DVI-I analog"); break;
+	case 5: printf("DVI-I digital %u channels", v & 0xf); break;
+	case 6: printf("HDMI-A"); break;
+	case 7: printf("HDMI-B"); break;
+	case 8: printf("MDDI %u channels", v & 0xf); break;
+	case 9: printf("DisplayPort %u channels", v & 0xf); break;
+	case 10: printf("IEEE-1394"); break;
+	case 11: printf("M1 analog"); break;
+	case 12: printf("M1 digital %u channels", v & 0xf); break;
+	default: printf("Reserved"); break;
+	}
+	printf("\n");
+
+	printf("    Interface Standard Version: %u.%u\n", x[1] >> 4, x[1] & 0xf);
+	printf("    Content Protection Support: ");
+	switch (x[2]) {
+	case 0: printf("None\n"); break;
+	case 1: printf("HDCP\n"); break;
+	case 2: printf("DTCP\n"); break;
+	case 3: printf("DPCP\n"); break;
+	default: printf("Reserved\n"); break;
+	}
+
+	printf("    Minimum Clock Frequency: %u MHz\n", x[3] >> 2);
+	printf("    Maximum Clock Frequency: %u MHz\n", ((x[3] & 0x03) << 8) | x[4]);
+	printf("    Device Native Pixel Format: %ux%u\n",
+	       x[5] | (x[6] << 8), x[7] | (x[8] << 8));
+	printf("    Aspect Ratio: %.2f\n", (100 + x[9]) / 100.0);
+	v = x[0x0a];
+	printf("    Default Orientation: ");
+	switch ((v & 0xc0) >> 6) {
+	case 0x00: printf("Landscape\n"); break;
+	case 0x01: printf("Portrait\n"); break;
+	case 0x02: printf("Not Fixed\n"); break;
+	case 0x03: printf("Undefined\n"); break;
+	}
+	printf("    Rotation Capability: ");
+	switch ((v & 0x30) >> 4) {
+	case 0x00: printf("None\n"); break;
+	case 0x01: printf("Can rotate 90 degrees clockwise\n"); break;
+	case 0x02: printf("Can rotate 90 degrees counterclockwise\n"); break;
+	case 0x03: printf("Can rotate 90 degrees in either direction)\n"); break;
+	}
+	printf("    Zero Pixel Location: ");
+	switch ((v & 0x0c) >> 2) {
+	case 0x00: printf("Upper Left\n"); break;
+	case 0x01: printf("Upper Right\n"); break;
+	case 0x02: printf("Lower Left\n"); break;
+	case 0x03: printf("Lower Right\n"); break;
+	}
+	printf("    Scan Direction: ");
+	switch (v & 0x03) {
+	case 0x00: printf("Not defined\n"); break;
+	case 0x01: printf("Fast Scan is on the Major (Long) Axis and Slow Scan is on the Minor Axis\n"); break;
+	case 0x02: printf("Fast Scan is on the Minor (Short) Axis and Slow Scan is on the Major Axis\n"); break;
+	case 0x03: printf("Reserved\n");
+		   fail("Scan Direction used the reserved value 0x03.\n");
+		   break;
+	}
+	printf("    Subpixel Information: ");
+	switch (x[0x0b]) {
+	case 0x00: printf("Not defined\n"); break;
+	case 0x01: printf("RGB vertical stripes\n"); break;
+	case 0x02: printf("RGB horizontal stripes\n"); break;
+	case 0x03: printf("Vertical stripes using primary order\n"); break;
+	case 0x04: printf("Horizontal stripes using primary order\n"); break;
+	case 0x05: printf("Quad sub-pixels, red at top left\n"); break;
+	case 0x06: printf("Quad sub-pixels, red at bottom left\n"); break;
+	case 0x07: printf("Delta (triad) RGB sub-pixels\n"); break;
+	case 0x08: printf("Mosaic\n"); break;
+	case 0x09: printf("Quad sub-pixels, RGB + 1 additional color\n"); break;
+	case 0x0a: printf("Five sub-pixels, RGB + 2 additional colors\n"); break;
+	case 0x0b: printf("Six sub-pixels, RGB + 3 additional colors\n"); break;
+	case 0x0c: printf("Clairvoyante, Inc. PenTile Matrix (tm) layout\n"); break;
+	default: printf("Reserved\n"); break;
+	}
+	printf("    Horizontal and vertical dot/pixel pitch: %.2f x %.2f mm\n",
+	       (double)(x[0x0c]) / 100.0, (double)(x[0x0d]) / 100.0);
+	v = x[0x0e];
+	printf("    Dithering: ");
+	switch (v >> 6) {
+	case 0: printf("None\n"); break;
+	case 1: printf("Spatial\n"); break;
+	case 2: printf("Temporal\n"); break;
+	case 3: printf("Spatial and Temporal\n"); break;
+	}
+	printf("    Direct Drive: %s\n", (v & 0x20) ? "Yes" : "No");
+	printf("    Overdrive %srecommended\n", (v & 0x10) ? "not " : "");
+	printf("    Deinterlacing: %s\n", (v & 0x08) ? "Yes" : "No");
+
+	v = x[0x0f];
+	printf("    Audio Support: %s\n", (v & 0x80) ? "Yes" : "No");
+	printf("    Separate Audio Inputs Provided: %s\n", (v & 0x40) ? "Yes" : "No");
+	printf("    Audio Input Override: %s\n", (v & 0x20) ? "Yes" : "No");
+	v = x[0x10];
+	if (v)
+		printf("    Audio Delay: %s%u ms\n", (v & 0x80) ? "" : "-", (v & 0x7f) * 2);
+	else
+		printf("    Audio Delay: no information provided\n");
+	v = x[0x11];
+	printf("    Frame Rate/Mode Conversion: ");
+	switch (v >> 6) {
+	case 0: printf("None\n"); break;
+	case 1: printf("Single Buffering\n"); break;
+	case 2: printf("Double Buffering\n"); break;
+	case 3: printf("Advanced Frame Rate Conversion\n"); break;
+	}
+	if (v & 0x3f)
+		printf("    Frame Rate Range: %u fps +/- %u fps\n",
+		       x[0x12], v & 0x3f);
+	else
+		printf("    Nominal Frame Rate: %u fps\n", x[0x12]);
+	printf("    Color Bit Depth: %u @ interface, %u @ display\n",
+	       (x[0x13] >> 4) + 1, (x[0x13] & 0xf) + 1);
+	v = x[0x15] & 3;
+	if (v) {
+		printf("    Additional Primary Chromaticities:\n");
+		unsigned col_x = (x[0x16] << 2) | (x[0x14] >> 6);
+		unsigned col_y = (x[0x17] << 2) | ((x[0x14] >> 4) & 3);
+		printf("      Primary 4:   0.%04u, 0.%04u\n",
+		       (col_x * 10000) / 1024, (col_y * 10000) / 1024);
+		if (v > 1) {
+			col_x = (x[0x18] << 2) | ((x[0x14] >> 2) & 3);
+			col_y = (x[0x19] << 2) | (x[0x14] & 3);
+			printf("      Primary 5:   0.%04u, 0.%04u\n",
+			       (col_x * 10000) / 1024, (col_y * 10000) / 1024);
+			if (v > 2) {
+				col_x = (x[0x1a] << 2) | (x[0x15] >> 6);
+				col_y = (x[0x1b] << 2) | ((x[0x15] >> 4) & 3);
+				printf("      Primary 6:   0.%04u, 0.%04u\n",
+				       (col_x * 10000) / 1024, (col_y * 10000) / 1024);
+			}
+		}
+	}
+
+	v = x[0x1c];
+	printf("    Response Time %s: %u ms\n",
+	       (v & 0x80) ? "White -> Black" : "Black -> White", v & 0x7f);
+	v = x[0x1d];
+	printf("    Overscan: %u%% x %u%%\n", v >> 4, v & 0xf);
 }
 
 static double decode_uchar_as_double(unsigned char x)
@@ -924,8 +1337,10 @@ static void cta_rcdb(const unsigned char *x, unsigned length)
 	unsigned spm = ((x[3] << 16) | (x[2] << 8) | x[1]);
 	unsigned i;
 
-	if (length < 4)
+	if (length < 4) {
+		fail("Empty Data Block with length %u.\n", length);
 		return;
+	}
 
 	if (x[0] & 0x40)
 		printf("    Speaker count: %u\n", (x[0] & 0x1f) + 1);
@@ -935,6 +1350,8 @@ static void cta_rcdb(const unsigned char *x, unsigned length)
 		if ((spm >> i) & 1)
 			printf("      %s\n", speaker_map[i]);
 	}
+	if ((x[0] & 0xa0) == 0x80)
+		fail("'Display' flag set, but not the 'SLD' flag.\n");
 	if ((x[0] & 0x20) && length >= 7) {
 		printf("    Xmax: %u dm\n", x[4]);
 		printf("    Ymax: %u dm\n", x[5]);
@@ -980,6 +1397,10 @@ static const char *speaker_location[] = {
 
 static void cta_sldb(const unsigned char *x, unsigned length)
 {
+	if (length < 2) {
+		fail("Empty Data Block with length %u.\n", length);
+		return;
+	}
 	while (length >= 2) {
 		printf("    Channel: %u (%sactive)\n", x[0] & 0x1f,
 		       (x[0] & 0x20) ? "" : "not ");
@@ -998,10 +1419,15 @@ static void cta_sldb(const unsigned char *x, unsigned length)
 	}
 }
 
-static void cta_vcdb(const unsigned char *x, unsigned length)
+void edid_state::cta_vcdb(const unsigned char *x, unsigned length)
 {
 	unsigned char d = x[0];
 
+	cta.has_vcdb = true;
+	if (length < 1) {
+		fail("Empty Data Block with length %u.\n", length);
+		return;
+	}
 	printf("    YCbCr quantization: %s\n",
 	       (d & 0x80) ? "Selectable (via AVI YQ)" : "No Data");
 	printf("    RGB quantization: %s\n",
@@ -1034,12 +1460,24 @@ static void cta_vcdb(const unsigned char *x, unsigned length)
 	case 3: printf("Supports both over- and underscan\n"); break;
 	}
 	printf("    IT scan behavior: ");
-	switch ((d >> 6) & 0x03) {
+	switch ((d >> 2) & 0x03) {
 	case 0: printf("IT video formats not supported\n"); break;
-	case 1: printf("Always Overscanned\n"); break;
-	case 2: printf("Always Underscanned\n"); break;
+	case 1:
+		printf("Always Overscanned\n");
+		// See Table 52 of CTA-861-G for a description of Byte 3
+		if (cta.byte3 & 0x80)
+			fail("IT video formats are always overscanned, but bit 7 of Byte 3 of the CTA-861 Extension header is set to underscanned.\n");
+		break;
+	case 2:
+		printf("Always Underscanned\n");
+		// See Table 52 of CTA-861-G for a description of Byte 3
+		if (!(cta.byte3 & 0x80))
+			fail("IT video formats are always underscanned, but bit 7 of Byte 3 of the CTA-861 Extension header is set to overscanned.\n");
+		break;
 	case 3: printf("Supports both over- and underscan\n"); break;
 	}
+	if (((d >> 2) & 0x03) < 2)
+		warn("IT scan behavior is expected to support underscanned.\n");
 	printf("    CE scan behavior: ");
 	switch (d & 0x03) {
 	case 0: printf("CE video formats not supported\n"); break;
@@ -1047,6 +1485,8 @@ static void cta_vcdb(const unsigned char *x, unsigned length)
 	case 2: printf("Always Underscanned\n"); break;
 	case 3: printf("Supports both over- and underscan\n"); break;
 	}
+	if ((d & 0x03) == 0)
+		warn("'CE video formats not supported' makes no sense.\n");
 }
 
 static const char *colorimetry_map[] = {
@@ -1064,16 +1504,18 @@ static void cta_colorimetry_block(const unsigned char *x, unsigned length)
 {
 	unsigned i;
 
-	if (length >= 2) {
-		for (i = 0; i < ARRAY_SIZE(colorimetry_map); i++) {
-			if (x[0] & (1 << i))
-				printf("    %s\n", colorimetry_map[i]);
-		}
-		if (x[1] & 0x80)
-			printf("    DCI-P3\n");
-		if (x[1] & 0x40)
-			printf("    ICtCp\n");
+	if (length < 2) {
+		fail("Empty Data Block with length %u.\n", length);
+		return;
 	}
+	for (i = 0; i < ARRAY_SIZE(colorimetry_map); i++) {
+		if (x[0] & (1 << i))
+			printf("    %s\n", colorimetry_map[i]);
+	}
+	if (x[1] & 0x80)
+		printf("    DCI-P3\n");
+	if (x[1] & 0x40)
+		printf("    ICtCp\n");
 }
 
 static const char *eotf_map[] = {
@@ -1087,23 +1529,25 @@ static void cta_hdr_static_metadata_block(const unsigned char *x, unsigned lengt
 {
 	unsigned i;
 
-	if (length >= 2) {
-		printf("    Electro optical transfer functions:\n");
-		for (i = 0; i < 6; i++) {
-			if (x[0] & (1 << i)) {
-				if (i < ARRAY_SIZE(eotf_map)) {
-					printf("      %s\n", eotf_map[i]);
-				} else {
-					printf("      Unknown (%u)\n", i);
-					fail("Unknown EOTF (%u)\n", i);
-				}
+	if (length < 2) {
+		fail("Empty Data Block with length %u.\n", length);
+		return;
+	}
+	printf("    Electro optical transfer functions:\n");
+	for (i = 0; i < 6; i++) {
+		if (x[0] & (1 << i)) {
+			if (i < ARRAY_SIZE(eotf_map)) {
+				printf("      %s\n", eotf_map[i]);
+			} else {
+				printf("      Unknown (%u)\n", i);
+				fail("Unknown EOTF (%u).\n", i);
 			}
 		}
-		printf("    Supported static metadata descriptors:\n");
-		for (i = 0; i < 8; i++) {
-			if (x[1] & (1 << i))
-				printf("      Static metadata type %u\n", i + 1);
-		}
+	}
+	printf("    Supported static metadata descriptors:\n");
+	for (i = 0; i < 8; i++) {
+		if (x[1] & (1 << i))
+			printf("      Static metadata type %u\n", i + 1);
 	}
 
 	if (length >= 3)
@@ -1121,6 +1565,10 @@ static void cta_hdr_static_metadata_block(const unsigned char *x, unsigned lengt
 
 static void cta_hdr_dyn_metadata_block(const unsigned char *x, unsigned length)
 {
+	if (length < 3) {
+		fail("Empty Data Block with length %u.\n", length);
+		return;
+	}
 	while (length >= 3) {
 		unsigned type_len = x[0];
 		unsigned type = x[1] | (x[2] << 8);
@@ -1130,10 +1578,20 @@ static void cta_hdr_dyn_metadata_block(const unsigned char *x, unsigned length)
 		printf("    HDR Dynamic Metadata Type %u\n", type);
 		switch (type) {
 		case 1:
-		case 2:
 		case 4:
 			if (type_len > 2)
 				printf("      Version: %u\n", x[3] & 0xf);
+			break;
+		case 2:
+			if (type_len > 2) {
+				unsigned version = x[3] & 0xf;
+				printf("      Version: %u\n", version);
+				if (version >= 1) {
+					if (x[3] & 0x10) printf("      Supports SL-HDR1 (ETSI TS 103 433-1)\n");
+					if (x[3] & 0x20) printf("      Supports SL-HDR2 (ETSI TS 103 433-2)\n");
+					if (x[3] & 0x40) printf("      Supports SL-HDR3 (ETSI TS 103 433-3)\n");
+				}
+			}
 			break;
 		default:
 			break;
@@ -1147,8 +1605,10 @@ static void cta_ifdb(const unsigned char *x, unsigned length)
 {
 	unsigned len_hdr = x[0] >> 5;
 
-	if (length < 2)
+	if (length < 2) {
+		fail("Empty Data Block with length %u.\n", length);
 		return;
+	}
 	printf("    VSIFs: %u\n", x[1]);
 	if (length < len_hdr + 2)
 		return;
@@ -1158,8 +1618,10 @@ static void cta_ifdb(const unsigned char *x, unsigned length)
 		int payload_len = x[0] >> 5;
 
 		if ((x[0] & 0x1f) == 1 && length >= 4) {
-			printf("    InfoFrame Type Code %u IEEE OUI: 0x%02x%02x%02x\n",
-			       x[0] & 0x1f, x[3], x[2], x[1]);
+			unsigned oui = (x[3] << 16) | (x[2] << 8) | x[1];
+
+			printf("    InfoFrame Type Code %u, OUI %s\n",
+			       x[0] & 0x1f, ouitohex(oui).c_str());
 			x += 4;
 			length -= 4;
 		} else {
@@ -1172,12 +1634,70 @@ static void cta_ifdb(const unsigned char *x, unsigned length)
 	}
 }
 
+void edid_state::cta_displayid_type_7(const unsigned char *x, unsigned length)
+{
+	check_displayid_datablock_revision(x[0], 0x00, 2);
+
+	if (length < 21U + ((x[0] & 0x70) >> 4)) {
+		fail("Empty Data Block with length %u.\n", length);
+		return;
+	}
+	parse_displayid_type_1_7_timing(x + 1, true, 2, true);
+}
+
+void edid_state::cta_displayid_type_8(const unsigned char *x, unsigned length)
+{
+	check_displayid_datablock_revision(x[0], 0xe8, 1);
+	if (length < ((x[0] & 0x08) ? 3 : 2)) {
+		fail("Empty Data Block with length %u.\n", length);
+		return;
+	}
+
+	unsigned sz = (x[0] & 0x08) ? 2 : 1;
+	unsigned type = x[0] >> 6;
+
+	if (type) {
+		fail("Only code type 0 is supported.\n");
+		return;
+	}
+
+	if (x[0] & 0x20)
+		printf("    Also supports YCbCr 4:2:0\n");
+
+	x++;
+	length--;
+	for (unsigned i = 0; i < length / sz; i++) {
+		unsigned id = x[i * sz];
+
+		if (sz == 2)
+			id |= x[i * sz + 1] << 8;
+		parse_displayid_type_4_8_timing(type, id, true);
+	}
+}
+
+void edid_state::cta_displayid_type_10(const unsigned char *x, unsigned length)
+{
+	check_displayid_datablock_revision(x[0], 0x70);
+	if (length < 7U + ((x[0] & 0x70) >> 4)) {
+		fail("Empty Data Block with length %u.\n", length);
+		return;
+	}
+
+	unsigned sz = 6U + ((x[0] & 0x70) >> 4);
+	x++;
+	length--;
+	for (unsigned i = 0; i < length / sz; i++)
+		parse_displayid_type_10_timing(x + i * sz, true);
+}
+
 static void cta_hdmi_audio_block(const unsigned char *x, unsigned length)
 {
 	unsigned num_descs;
 
-	if (length < 2)
+	if (length < 2) {
+		fail("Empty Data Block with length %u.\n", length);
 		return;
+	}
 	if (x[0] & 3)
 		printf("    Max Stream Count: %u\n", (x[0] & 3) + 1);
 	if (x[0] & 4)
@@ -1236,227 +1756,263 @@ static void cta_hdmi_audio_block(const unsigned char *x, unsigned length)
 	}
 }
 
-static const char *oui_name(unsigned oui)
+void edid_state::cta_ext_block(const unsigned char *x, unsigned length)
 {
-	switch (oui) {
-	case 0x00001a: return "AMD";
-	case 0x00044b: return "NVIDIA";
-	case 0x000c6e: return "ASUS";
-	case 0x0010fa: return "Apple";
-	case 0x0014b9: return "MSTAR";
-	case 0x00d046: return "Dolby";
-	case 0x00e047: return "InFocus";
-	case 0xca125c: return "Microsoft";
-	default: return NULL;
+	const char *name;
+	unsigned oui;
+	bool reverse = false;
+	bool audio_block = false;
+
+	switch (x[0]) {
+	case 0x00: data_block = "Video Capability Data Block"; break;
+	case 0x01: data_block.clear(); break;
+	case 0x02: data_block = "VESA Video Display Device Data Block"; break;
+	case 0x03: data_block = "VESA Video Timing Block Extension"; break;
+	case 0x04: data_block = "Reserved for HDMI Video Data Block"; break;
+	case 0x05: data_block = "Colorimetry Data Block"; break;
+	case 0x06: data_block = "HDR Static Metadata Data Block"; break;
+	case 0x07: data_block = "HDR Dynamic Metadata Data Block"; break;
+
+	case 0x0d: data_block = "Video Format Preference Data Block"; break;
+	case 0x0e: data_block = "YCbCr 4:2:0 Video Data Block"; break;
+	case 0x0f: data_block = "YCbCr 4:2:0 Capability Map Data Block"; break;
+	case 0x10: data_block = "Reserved for CTA-861 Miscellaneous Audio Fields"; break;
+	case 0x11: data_block.clear(); audio_block = true; break;
+	case 0x12: data_block = "HDMI Audio Data Block"; audio_block = true; break;
+	case 0x13: data_block = "Room Configuration Data Block"; audio_block = true; break;
+	case 0x14: data_block = "Speaker Location Data Block"; audio_block = true; break;
+
+	case 0x20: data_block = "InfoFrame Data Block"; break;
+
+	case 0x34: data_block = "DisplayID Type VII Video Timing Data Block"; break;
+	case 0x35: data_block = "DisplayID Type VIII Video Timing Data Block"; break;
+	case 0x42: data_block = "DisplayID Type X Video Timing Data Block"; break;
+
+	case 0x78: data_block = "HDMI Forum EDID Extension Override Data Block"; break;
+	case 0x79: data_block = "HDMI Forum Sink Capability Data Block"; break;
+	default:
+		if (x[0] <= 12)
+			printf("  Unknown CTA-861 Video-Related");
+		else if (x[0] <= 31)
+			printf("  Unknown CTA-861 Audio-Related");
+		else if (x[0] >= 120 && x[0] <= 127)
+			printf("  Unknown CTA-861 HDMI-Related");
+		else
+			printf("  Unknown CTA-861");
+		printf(" Data Block (extended tag 0x%02x, length %u)\n", x[0], length);
+		hex_block("    ", x + 1, length);
+		data_block.clear();
+		warn("Unknown Extended CTA-861 Data Block 0x%02x.\n", x[0]);
+		return;
 	}
+
+	// See Table 52 of CTA-861-G for a description of Byte 3
+	if (audio_block && !(cta.byte3 & 0x40))
+		fail("audio information is present, but bit 6 of Byte 3 of the CTA-861 Extension header indicates no Basic Audio support.\n");
+
+	if (data_block.length())
+		printf("  %s:\n", data_block.c_str());
+
+	switch (x[0]) {
+	case 0x00: cta_vcdb(x + 1, length); return;
+	case 0x01:
+		if (length < 3) {
+			data_block = std::string("Vendor-Specific Video Data Block");
+			fail("Invalid length %u < 3.\n", length);
+			return;
+		}
+		oui = (x[3] << 16) + (x[2] << 8) + x[1];
+		name = oui_name(oui);
+		if (!name) {
+			name = oui_name(oui, true);
+			if (name)
+				reverse = true;
+		}
+		if (!name) {
+			printf("  Vendor-Specific Video Data Block, OUI %s:\n",
+			       ouitohex(oui).c_str());
+			hex_block("    ", x + 4, length - 3);
+			data_block.clear();
+			warn("Unknown Extended Vendor-Specific Video Data Block, OUI %s.\n",
+			     ouitohex(oui).c_str());
+			return;
+		}
+		data_block = std::string("Vendor-Specific Video Data Block (") + name + ")";
+		if (reverse)
+			fail((std::string("OUI ") + ouitohex(oui) + " is in the wrong byte order\n").c_str());
+		printf("  %s, OUI %s:\n", data_block.c_str(), ouitohex(oui).c_str());
+		if (oui == 0x90848b)
+			cta_hdr10plus(x + 4, length - 3);
+		else if (oui == 0x00d046)
+			cta_dolby_video(x + 4, length - 3);
+		else
+			hex_block("    ", x + 4, length - 3);
+		return;
+	case 0x02: cta_vesa_vdddb(x + 1, length); return;
+	case 0x05: cta_colorimetry_block(x + 1, length); return;
+	case 0x06: cta_hdr_static_metadata_block(x + 1, length); return;
+	case 0x07: cta_hdr_dyn_metadata_block(x + 1, length); return;
+	case 0x0d: cta_vfpdb(x + 1, length); return;
+	case 0x0e: cta_svd(x + 1, length, true); return;
+	case 0x0f: cta_y420cmdb(x + 1, length); return;
+	case 0x11:
+		if (length < 3) {
+			data_block = std::string("Vendor-Specific Audio Data Block");
+			fail("Invalid length %u < 3.\n", length);
+			return;
+		}
+		oui = (x[3] << 16) + (x[2] << 8) + x[1];
+		name = oui_name(oui);
+		if (!name) {
+			name = oui_name(oui, true);
+			if (name)
+				reverse = true;
+		}
+		if (!name) {
+			printf("  Vendor-Specific Audio Data Block, OUI %s:\n",
+			       ouitohex(oui).c_str());
+			hex_block("    ", x + 4, length - 3);
+			data_block.clear();
+			warn("Unknown Extended Vendor-Specific Audio Data Block, OUI %s.\n",
+			     ouitohex(oui).c_str());
+			return;
+		}
+		data_block = std::string("Vendor-Specific Audio Data Block (") + name + ")";
+		if (reverse)
+			fail((std::string("OUI ") + ouitohex(oui) + " is in the wrong byte order\n").c_str());
+		printf("  %s, OUI %s:\n", data_block.c_str(), ouitohex(oui).c_str());
+		if (oui == 0x00d046)
+			cta_dolby_audio(x + 4, length - 3);
+		else
+			hex_block("    ", x + 4, length - 3);
+		return;
+	case 0x12: cta_hdmi_audio_block(x + 1, length); return;
+	case 0x13: cta_rcdb(x + 1, length); return;
+	case 0x14: cta_sldb(x + 1, length); return;
+	case 0x20: cta_ifdb(x + 1, length); return;
+	case 0x34: cta_displayid_type_7(x + 1, length); return;
+	case 0x35: cta_displayid_type_8(x + 1, length); return;
+	case 0x42: cta_displayid_type_10(x + 1, length); return;
+	case 0x78:
+		cta_hf_eeodb(x + 1, length);
+		// This must be the first CTA-861 block
+		if (!cta.first_block)
+			fail("Block starts at a wrong offset.\n");
+		return;
+	case 0x79:
+		if (!cta.last_block_was_hdmi_vsdb)
+			fail("HDMI Forum SCDB did not immediately follow the HDMI VSDB.\n");
+		if (cta.have_hf_scdb || cta.have_hf_vsdb)
+			fail("Duplicate HDMI Forum VSDB/SCDB.\n");
+		if (length < 2) {
+			data_block = std::string("HDMI Forum SCDB");
+			fail("Invalid length %u < 2.\n", length);
+			return;
+		}
+		if (x[1] || x[2])
+			printf("  Non-zero SCDB reserved fields!\n");
+		cta_hf_scdb(x + 3, length - 2);
+		cta.have_hf_scdb = 1;
+		return;
+	}
+
+	hex_block("    ", x + 1, length);
 }
 
 void edid_state::cta_block(const unsigned char *x)
 {
-	static int last_block_was_hdmi_vsdb;
-	static int have_hf_vsdb, have_hf_scdb;
-	static int first_block = 1;
 	unsigned length = x[0] & 0x1f;
 	const char *name;
 	unsigned oui;
+	bool reverse = false;
+	bool audio_block = false;
 
 	switch ((x[0] & 0xe0) >> 5) {
 	case 0x01:
 		data_block = "Audio Data Block";
-		printf("  %s\n", data_block.c_str());
+		printf("  %s:\n", data_block.c_str());
 		cta_audio_block(x + 1, length);
+		audio_block = true;
 		break;
 	case 0x02:
 		data_block = "Video Data Block";
-		printf("  %s\n", data_block.c_str());
-		cta_svd(x + 1, length, 0);
+		printf("  %s:\n", data_block.c_str());
+		cta_svd(x + 1, length, false);
 		break;
 	case 0x03:
 		oui = (x[3] << 16) + (x[2] << 8) + x[1];
-		printf("  Vendor-Specific Data Block, OUI 0x%06x", oui);
 		name = oui_name(oui);
+		if (!name) {
+			name = oui_name(oui, true);
+			if (name)
+				reverse = true;
+		}
+		if (!name) {
+			printf("  Vendor-Specific Data Block, OUI %s:\n", ouitohex(oui).c_str());
+			hex_block("    ", x + 4, length - 3);
+			data_block.clear();
+			warn("Unknown Vendor-Specific Data Block, OUI %s.\n",
+			     ouitohex(oui).c_str());
+			return;
+		}
+		data_block = std::string("Vendor-Specific Data Block (") + name + ")";
+		if (reverse)
+			fail((std::string("OUI ") + ouitohex(oui) + " is in the wrong byte order\n").c_str());
+		printf("  %s, OUI %s:\n", data_block.c_str(), ouitohex(oui).c_str());
 		if (oui == 0x000c03) {
-			data_block = "Vendor-Specific Data Block (HDMI)";
 			cta_hdmi_block(x + 1, length);
-			last_block_was_hdmi_vsdb = 1;
-			first_block = 0;
-			if (edid_minor != 3)
-				fail("The HDMI Specification uses EDID 1.3, not 1.%u\n", edid_minor);
+			cta.last_block_was_hdmi_vsdb = 1;
+			cta.first_block = 0;
+			// The HDMI OUI is present, so this EDID represents an HDMI
+			// interface. And HDMI interfaces must use EDID version 1.3
+			// according to the HDMI Specification, so check for this.
+			if (base.edid_minor != 3)
+				fail("The HDMI Specification requires EDID 1.3 instead of 1.%u.\n",
+				     base.edid_minor);
 			return;
 		}
 		if (oui == 0xc45dd8) {
-			data_block = "Vendor-Specific Data Block (HDMI Forum)";
-			if (!last_block_was_hdmi_vsdb)
-				fail("HDMI Forum VSDB did not immediately follow the HDMI VSDB\n");
-			if (have_hf_scdb || have_hf_vsdb)
-				fail("Duplicate HDMI Forum VSDB/SCDB\n");
-			printf(" (HDMI Forum)\n");
+			if (!cta.last_block_was_hdmi_vsdb)
+				fail("HDMI Forum VSDB did not immediately follow the HDMI VSDB.\n");
+			if (cta.have_hf_scdb || cta.have_hf_vsdb)
+				fail("Duplicate HDMI Forum VSDB/SCDB.\n");
 			cta_hf_scdb(x + 4, length - 3);
-			have_hf_vsdb = 1;
-		} else if (name) {
-			data_block = std::string("Vendor-Specific Data Block (") + name + ")";
-			printf(" (%s)\n", name);
-			hex_block("    ", x + 4, length - 3);
-		} else {
-			printf("\n");
-			hex_block("    ", x + 4, length - 3);
-			data_block.clear();
-			warn("Unknown Vendor-Specific Data Block, OUI 0x%06x\n", oui);
+			cta.have_hf_vsdb = 1;
+			break;
 		}
+		hex_block("    ", x + 4, length - 3);
 		break;
 	case 0x04:
 		data_block = "Speaker Allocation Data Block";
-		printf("  %s\n", data_block.c_str());
+		printf("  %s:\n", data_block.c_str());
 		cta_sadb(x + 1, length);
+		audio_block = true;
 		break;
 	case 0x05:
-		printf("  VESA DTC Data Block\n");
-		hex_block("  ", x + 1, length);
+		data_block = "VESA Display Transfer Characteristics Data Block";
+		printf("  %s:\n", data_block.c_str());
+		cta_vesa_dtcdb(x + 1, length);
 		break;
 	case 0x07:
-		printf("  Extended tag: ");
-		switch (x[1]) {
-		case 0x00:
-			data_block = "Video Capability Data Block";
-			printf("%s\n", data_block.c_str());
-			cta_vcdb(x + 2, length - 1);
-			break;
-		case 0x01:
-			oui = (x[4] << 16) + (x[3] << 8) + x[2];
-			printf("Vendor-Specific Video Data Block, OUI 0x%06x", oui);
-			name = oui_name(oui);
-			if (oui == 0x90848b) {
-				data_block = "Vendor-Specific Video Data Block (HDR10+)";
-				printf(" (HDR10+)\n");
-				cta_hdr10plus(x + 5, length - 4);
-			} else if (name) {
-				data_block = std::string("Vendor-Specific Data Block (") + name + ")";
-				printf(" (%s)\n", name);
-				hex_block("    ", x + 5, length - 4);
-			} else {
-				printf("\n");
-				hex_block("    ", x + 5, length - 4);
-				data_block.clear();
-				warn("Unknown Extended Vendor-Specific Data Block, OUI 0x%06x\n", oui);
-			}
-			break;
-		case 0x02:
-			printf("VESA Video Display Device Data Block\n");
-			hex_block("  ", x + 2, length - 1);
-			break;
-		case 0x03:
-			printf("VESA Video Timing Block Extension\n");
-			hex_block("  ", x + 2, length - 1);
-			break;
-		case 0x04:
-			printf("Reserved for HDMI Video Data Block\n");
-			hex_block("  ", x + 2, length - 1);
-			break;
-		case 0x05:
-			data_block = "Colorimetry Data Block";
-			printf("%s\n", data_block.c_str());
-			cta_colorimetry_block(x + 2, length - 1);
-			break;
-		case 0x06:
-			data_block = "HDR Static Metadata Data Block";
-			printf("%s\n", data_block.c_str());
-			cta_hdr_static_metadata_block(x + 2, length - 1);
-			break;
-		case 0x07:
-			data_block = "HDR Dynamic Metadata Data Block";
-			printf("%s\n", data_block.c_str());
-			cta_hdr_dyn_metadata_block(x + 2, length - 1);
-			break;
-		case 0x0d:
-			data_block = "Video Format Preference Data Block";
-			printf("%s\n", data_block.c_str());
-			cta_vfpdb(x + 2, length - 1);
-			break;
-		case 0x0e:
-			data_block = "YCbCr 4:2:0 Video Data Block";
-			printf("%s\n", data_block.c_str());
-			cta_svd(x + 2, length - 1, 1);
-			break;
-		case 0x0f:
-			data_block = "YCbCr 4:2:0 Capability Map Data Block";
-			printf("%s\n", data_block.c_str());
-			cta_y420cmdb(x + 2, length - 1);
-			break;
-		case 0x10:
-			printf("Reserved for CTA Miscellaneous Audio Fields\n");
-			hex_block("  ", x + 2, length - 1);
-			break;
-		case 0x11:
-			printf("Vendor-Specific Audio Data Block\n");
-			hex_block("  ", x + 2, length - 1);
-			break;
-		case 0x12:
-			data_block = "HDMI Audio Data Block";
-			printf("%s\n", data_block.c_str());
-			cta_hdmi_audio_block(x + 2, length - 1);
-			break;
-		case 0x13:
-			data_block = "Room Configuration Data Block";
-			printf("%s\n", data_block.c_str());
-			cta_rcdb(x + 2, length - 1);
-			break;
-		case 0x14:
-			data_block = "Speaker Location Data Block";
-			printf("%s\n", data_block.c_str());
-			cta_sldb(x + 2, length - 1);
-			break;
-		case 0x20:
-			printf("InfoFrame Data Block\n");
-			cta_ifdb(x + 2, length - 1);
-			break;
-		case 0x78:
-			data_block = "HDMI Forum EDID Extension Override Data Block";
-			printf("%s\n", data_block.c_str());
-			cta_hf_eeodb(x + 2, length - 1);
-			// This must be the first CTA block
-			if (!first_block)
-				fail("Block starts at a wrong offset\n");
-			break;
-		case 0x79:
-			data_block = "HDMI Forum Sink Capability Data Block";
-			printf("%s\n", data_block.c_str());
-			if (!last_block_was_hdmi_vsdb)
-				fail("HDMI Forum SCDB did not immediately follow the HDMI VSDB\n");
-			if (have_hf_scdb || have_hf_vsdb)
-				fail("Duplicate HDMI Forum VSDB/SCDB\n");
-			if (x[2] || x[3])
-				printf("  Non-zero SCDB reserved fields!\n");
-			cta_hf_scdb(x + 4, length - 3);
-			have_hf_scdb = 1;
-			break;
-		default:
-			if (x[1] <= 12)
-				printf("Unknown CTA Video-Related");
-			else if (x[1] <= 31)
-				printf("Unknown CTA Audio-Related");
-			else if (x[1] >= 120 && x[1] <= 127)
-				printf("Unknown CTA HDMI-Related");
-			else
-				printf("Unknown CTA");
-			printf(" Data Block (extended tag 0x%02x, length %u)\n", x[1], length - 1);
-			hex_block("    ", x + 2, length - 1);
-			data_block.clear();
-			warn("Unknown Extended CTA Data Block 0x%02x\n", x[1]);
-			break;
-		}
+		cta_ext_block(x + 1, length - 1);
 		break;
 	default: {
 		unsigned tag = (*x & 0xe0) >> 5;
 		unsigned length = *x & 0x1f;
-		printf("  Unknown CTA tag 0x%02x, length %u\n", tag, length);
+
+		printf("  Unknown CTA-861 tag 0x%02x, length %u\n", tag, length);
 		hex_block("    ", x + 1, length);
 		data_block.clear();
-		warn("Unknown CTA Data Block %u\n", tag);
+		warn("Unknown CTA-861 Data Block %u.\n", tag);
 		break;
 	}
 	}
-	first_block = 0;
-	last_block_was_hdmi_vsdb = 0;
+
+	// See Table 52 of CTA-861-G for a description of Byte 3
+	if (audio_block && !(cta.byte3 & 0x40))
+		fail("audio information is present, but bit 6 of Byte 3 of the CTA-861 Extension header indicates no Basic Audio support.\n");
+	cta.first_block = 0;
+	cta.last_block_was_hdmi_vsdb = 0;
 }
 
 void edid_state::preparse_cta_block(const unsigned char *x)
@@ -1464,14 +2020,42 @@ void edid_state::preparse_cta_block(const unsigned char *x)
 	unsigned version = x[1];
 	unsigned offset = x[2];
 
+	if (offset >= 4) {
+		const unsigned char *detailed;
+
+		for (detailed = x + offset; detailed + 17 < x + 127; detailed += 18) {
+			if (memchk(detailed, 18))
+				break;
+			if (detailed[0] || detailed[1])
+				cta.preparse_total_dtds++;
+		}
+	}
+
 	if (version < 3)
 		return;
 
 	for (unsigned i = 4; i < offset; i += (x[i] & 0x1f) + 1) {
 		bool for_ycbcr420 = false;
+		unsigned oui;
 
 		switch ((x[i] & 0xe0) >> 5) {
+		case 0x03:
+			oui = (x[i + 3] << 16) + (x[i + 2] << 8) + x[i + 1];
+			if (oui == 0x000c03) {
+				cta.has_hdmi = true;
+				cta.preparsed_phys_addr = (x[i + 4] << 8) | x[i + 5];
+			}
+			break;
 		case 0x07:
+			if (x[i + 1] == 0x0d)
+				cta.has_vfpdb = true;
+			if (x[i + 1] == 0x22)
+				cta.preparse_total_vtdbs++;
+			if (x[i + 1] == 0x23)
+				cta.preparse_has_t8vtdb = true;
+			if (x[i + 1] == 0x32)
+				cta.preparse_total_vtdbs +=
+					((x[i] & 0x1f) - 2) / (6 + ((x[i + 2] & 0x70) >> 4));
 			if (x[i + 1] != 0x0e)
 				continue;
 			for_ycbcr420 = true;
@@ -1482,8 +2066,8 @@ void edid_state::preparse_cta_block(const unsigned char *x)
 
 				if ((vic & 0x7f) <= 64)
 					vic &= 0x7f;
-				preparsed_svds[for_ycbcr420].push_back(vic);
-				preparsed_has_vic[for_ycbcr420][vic] = true;
+				cta.preparsed_svds[for_ycbcr420].push_back(vic);
+				cta.preparsed_has_vic[for_ycbcr420][vic] = true;
 			}
 			break;
 		}
@@ -1496,61 +2080,222 @@ void edid_state::parse_cta_block(const unsigned char *x)
 	unsigned offset = x[2];
 	const unsigned char *detailed;
 
-	printf("%s Revision %u\n", block.c_str(), version);
+	// See Table 52 of CTA-861-G for a description of Byte 3
+
+	printf("  Revision: %u\n", version);
+	if (version == 0)
+		fail("Invalid CTA-861 Extension revision 0.\n");
+	if (version == 2)
+		fail("Deprecated CTA-861 Extension revision 2.\n");
+	if (cta.has_hdmi && version != 3)
+		fail("The HDMI Specification requires CTA Extension revision 3.\n");
+	if (version > 3)
+		warn("Unknown CTA-861 Extension revision %u.\n", version);
 
 	if (version >= 1) do {
 		if (version == 1 && x[3] != 0)
-			fail("Non-zero byte 3\n");
+			fail("Non-zero byte 3.\n");
 
 		if (offset < 4)
 			break;
 
-		if (version < 3) {
-			printf("%u 8-byte timing descriptors\n", (offset - 4) / 8);
-			if (offset - 4 > 0) {
-				/* do stuff */
+		if (version < 3 && ((offset - 4) / 8)) {
+			printf("  8-byte timing descriptors: %u\n", (offset - 4) / 8);
+			fail("8-byte descriptors were never used.\n");
+		}
+
+		if (version >= 2) {
+			if (x[3] & 0x80)
+				printf("  Underscans IT Video Formats by default\n");
+			else
+				warn("IT Video Formats are overscanned by default, but normally this should be underscanned.\n");
+			if (x[3] & 0x40)
+				printf("  Basic audio support\n");
+			if (x[3] & 0x20)
+				printf("  Supports YCbCr 4:4:4\n");
+			if (x[3] & 0x10)
+				printf("  Supports YCbCr 4:2:2\n");
+			// Disable this test: this fails a lot of EDIDs, and there are
+			// also some corner cases where you only want to receive 4:4:4
+			// and refuse a fallback to 4:2:2.
+//			if ((x[3] & 0x30) && (x[3] & 0x30) != 0x30)
+//				msg(!cta.has_hdmi, "If YCbCr support is indicated, then both 4:2:2 and 4:4:4 %s be supported.\n",
+//				    cta.has_hdmi ? "shall" : "should");
+			printf("  Native detailed modes: %u\n", x[3] & 0x0f);
+			if (cta.first_block)
+				cta.byte3 = x[3];
+			else if (x[3] != cta.byte3)
+				fail("Byte 3 must be the same for all CTA-861 Extension Blocks.\n");
+			if (cta.first_block) {
+				unsigned native_dtds = x[3] & 0x0f;
+
+				cta.native_timings.clear();
+				if (!native_dtds && !cta.has_vfpdb) {
+					cta.first_svd_might_be_preferred = true;
+				} else if (native_dtds > cta.preparse_total_dtds) {
+					fail("There are more Native DTDs (%u) than DTDs (%u).\n",
+					     native_dtds, cta.preparse_total_dtds);
+				}
+				if (native_dtds > cta.preparse_total_dtds)
+					native_dtds = cta.preparse_total_dtds;
+				for (unsigned i = 0; i < native_dtds; i++) {
+					char type[16];
+
+					sprintf(type, "DTD %3u", i + 1);
+					cta.native_timings.push_back(timings_ext(i + 129, type));
+				}
+				if (cta.has_hdmi && block_nr != (block_map.saw_block_1 ? 2 : 1))
+					fail("The HDMI Specification requires that the first Extension Block (that is not a Block Map) is an CTA-861 Extension Block.\n");
 			}
 		}
-
-		if (version >= 2) {    
-			if (x[3] & 0x80)
-				printf("Underscans PC formats by default\n");
-			if (x[3] & 0x40)
-				printf("Basic audio support\n");
-			if (x[3] & 0x20)
-				printf("Supports YCbCr 4:4:4\n");
-			if (x[3] & 0x10)
-				printf("Supports YCbCr 4:2:2\n");
-			printf("%u native detailed modes\n", x[3] & 0x0f);
-		}
-		if (version == 3) {
+		if (version >= 3) {
 			unsigned i;
 
-			printf("%u bytes of CTA data blocks\n", offset - 4);
 			for (i = 4; i < offset; i += (x[i] & 0x1f) + 1)
 				cta_block(x + i);
+
+			data_block.clear();
+			if (i != offset)
+				fail("Offset is %u, but should be %u.\n", offset, i);
 		}
 
-		unsigned cnt;
-		for (detailed = x + offset, cnt = 1; detailed + 18 < x + 127; detailed += 18, cnt++) {
+		data_block = "Detailed Timing Descriptors";
+		base.seen_non_detailed_descriptor = false;
+		bool first = true;
+		for (detailed = x + offset; detailed + 17 < x + 127; detailed += 18) {
 			if (memchk(detailed, 18))
 				break;
-			data_block = "Detailed Timings #" + std::to_string(cnt);
-			detailed_timings("", detailed);
+			if (first) {
+				first = false;
+				printf("  %s:\n", data_block.c_str());
+			}
+			detailed_block(detailed);
 		}
-		if (!memchk(detailed, x + 0x7f - detailed)) {
+		if (!memchk(detailed, x + 127 - detailed)) {
 			data_block = "Padding";
-			fail("CTA-861 padding contains non-zero bytes\n");
+			fail("CTA-861 padding contains non-zero bytes.\n");
 		}
 	} while (0);
 
 	data_block.clear();
-	if (has_serial_number && has_serial_string)
-		fail("Both the serial number and the serial string are set\n");
-	if (!has_cta861_vic_1 && !has_640x480p60_est_timing)
+	if (base.has_serial_number && base.has_serial_string)
+		warn("Display Product Serial Number is set, so the Serial Number in the Base EDID should be 0.\n");
+	if (!cta.has_vic_1 && !base.has_640x480p60_est_timing)
 		fail("Required 640x480p60 timings are missing in the established timings"
-		     " and the SVD list (VIC 1)\n");
-	if ((supported_hdmi_vic_vsb_codes & supported_hdmi_vic_codes) !=
-	    supported_hdmi_vic_codes)
-		fail("HDMI VIC Codes must have their CTA-861 VIC equivalents in the VSB\n");
+		     " and the SVD list (VIC 1).\n");
+	if ((cta.supported_hdmi_vic_vsb_codes & cta.supported_hdmi_vic_codes) !=
+	    cta.supported_hdmi_vic_codes)
+		fail("HDMI VIC Codes must have their CTA-861 VIC equivalents in the VSB.\n");
+	if (!cta.has_vcdb)
+		warn("Missing VCDB, needed for Set Selectable RGB Quantization to avoid interop issues.\n");
+}
+
+void edid_state::cta_resolve_svr(vec_timings_ext::iterator iter)
+{
+	if (iter->svr() == 254) {
+		iter->flags = cta.t8vtdb.flags;
+		iter->t = cta.t8vtdb.t;
+	} else if (iter->svr() <= 144) {
+		iter->flags = cta.vec_dtds[iter->svr() - 129].flags;
+		iter->t = cta.vec_dtds[iter->svr() - 129].t;
+	} else {
+		iter->flags = cta.vec_vtdbs[iter->svr() - 145].flags;
+		iter->t = cta.vec_vtdbs[iter->svr() - 145].t;
+	}
+}
+
+void edid_state::cta_resolve_svrs()
+{
+	for (vec_timings_ext::iterator iter = cta.preferred_timings.begin();
+	     iter != cta.preferred_timings.end(); ++iter) {
+		if (iter->has_svr())
+			cta_resolve_svr(iter);
+	}
+
+	for (vec_timings_ext::iterator iter = cta.native_timings.begin();
+	     iter != cta.native_timings.end(); ++iter) {
+		if (iter->has_svr())
+			cta_resolve_svr(iter);
+	}
+}
+
+void edid_state::check_cta_blocks()
+{
+	unsigned max_pref_prog_hact = 0;
+	unsigned max_pref_prog_vact = 0;
+	unsigned max_pref_ilace_hact = 0;
+	unsigned max_pref_ilace_vact = 0;
+
+	data_block = "CTA-861";
+	for (vec_timings_ext::iterator iter = cta.preferred_timings.begin();
+	     iter != cta.preferred_timings.end(); ++iter) {
+		if (iter->t.interlaced &&
+		    (iter->t.vact > max_pref_ilace_vact ||
+		     (iter->t.vact == max_pref_ilace_vact && iter->t.hact >= max_pref_ilace_hact))) {
+			max_pref_ilace_hact = iter->t.hact;
+			max_pref_ilace_vact = iter->t.vact;
+		}
+		if (!iter->t.interlaced &&
+		    (iter->t.vact > max_pref_prog_vact ||
+		     (iter->t.vact == max_pref_prog_vact && iter->t.hact >= max_pref_prog_hact))) {
+			max_pref_prog_hact = iter->t.hact;
+			max_pref_prog_vact = iter->t.vact;
+		}
+	}
+
+	unsigned native_prog = 0;
+	unsigned native_prog_hact = 0;
+	unsigned native_prog_vact = 0;
+	bool native_prog_mixed_resolutions = false;
+	unsigned native_ilace = 0;
+	unsigned native_ilace_hact = 0;
+	unsigned native_ilace_vact = 0;
+	bool native_ilace_mixed_resolutions = false;
+
+	for (vec_timings_ext::iterator iter = cta.native_timings.begin();
+	     iter != cta.native_timings.end(); ++iter) {
+		if (iter->t.interlaced) {
+			native_ilace++;
+			if (!native_ilace_hact) {
+				native_ilace_hact = iter->t.hact;
+				native_ilace_vact = iter->t.vact;
+			} else if (native_ilace_hact != iter->t.hact ||
+				   native_ilace_vact != iter->t.vact) {
+				native_ilace_mixed_resolutions = true;
+			}
+		} else {
+			native_prog++;
+			if (!native_prog_hact) {
+				native_prog_hact = iter->t.hact;
+				native_prog_vact = iter->t.vact;
+			} else if (native_prog_hact != iter->t.hact ||
+				   native_prog_vact != iter->t.vact) {
+				native_prog_mixed_resolutions = true;
+			}
+		}
+	}
+
+	if (native_prog_mixed_resolutions)
+		fail("Native progressive timings are a mix of several resolutions.\n");
+	if (native_ilace_mixed_resolutions)
+		fail("Native interlaced timings are a mix of several resolutions.\n");
+	if (native_ilace && !native_prog)
+		fail("A native interlaced timing is present, but not a native progressive timing.\n");
+	if (!native_prog_mixed_resolutions && native_prog > 1)
+		warn("Multiple native progressive timings are defined.\n");
+	if (!native_ilace_mixed_resolutions && native_ilace > 1)
+		warn("Multiple native interlaced timings are defined.\n");
+
+	if (!native_prog_mixed_resolutions && native_prog_vact &&
+	    (max_pref_prog_vact > native_prog_vact ||
+	     (max_pref_prog_vact == native_prog_vact && max_pref_prog_hact > native_prog_hact)))
+		warn("Native progressive resolution of %ux%u is smaller than the max preferred progressive resolution %ux%u.\n",
+		     native_prog_hact, native_prog_vact,
+		     max_pref_prog_hact, max_pref_prog_vact);
+	if (!native_ilace_mixed_resolutions && native_ilace_vact &&
+	    (max_pref_ilace_vact > native_ilace_vact ||
+	     (max_pref_ilace_vact == native_ilace_vact && max_pref_ilace_hact > native_ilace_hact)))
+		warn("Native interlaced resolution of %ux%u is smaller than the max preferred interlaced resolution %ux%u.\n",
+		     native_ilace_hact, native_ilace_vact,
+		     max_pref_ilace_hact, max_pref_ilace_vact);
 }

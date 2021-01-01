@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 /*
  * Copyright 2006-2012 Red Hat, Inc.
- * Copyright 2018-2019 Cisco Systems, Inc. and/or its affiliates. All rights reserved.
+ * Copyright 2018-2020 Cisco Systems, Inc. and/or its affiliates. All rights reserved.
  *
  * Author: Adam Jackson <ajax@nwnk.net>
  * Maintainer: Hans Verkuil <hverkuil-cisco@xs4all.nl>
@@ -14,20 +14,24 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
 
 #include "edid-decode.h"
 
+#define STR(x) #x
+#define STRING(x) STR(x)
+
 static edid_state state;
 
 static unsigned char edid[EDID_PAGE_SIZE * EDID_MAX_BLOCKS];
+static bool odd_hex_digits;
 
 enum output_format {
 	OUT_FMT_DEFAULT,
 	OUT_FMT_HEX,
 	OUT_FMT_RAW,
-	OUT_FMT_CARRAY
+	OUT_FMT_CARRAY,
+	OUT_FMT_XML,
 };
 
 /*
@@ -38,11 +42,20 @@ enum output_format {
 enum Option {
 	OptCheck = 'c',
 	OptCheckInline = 'C',
-	OptExtract = 'e',
 	OptHelp = 'h',
+	OptNativeTimings = 'n',
 	OptOutputFormat = 'o',
+	OptPreferredTimings = 'p',
+	OptPhysicalAddress = 'P',
+	OptLongTimings = 'L',
+	OptShortTimings = 'S',
+	OptFBModeTimings = 'F',
+	OptXModeLineTimings = 'X',
+	OptV4L2Timings = 'V',
 	OptSkipHexDump = 's',
 	OptSkipSHA = 128,
+	OptHideSerialNumbers,
+	OptVersion,
 	OptLast = 256
 };
 
@@ -51,11 +64,20 @@ static char options[OptLast];
 static struct option long_options[] = {
 	{ "help", no_argument, 0, OptHelp },
 	{ "output-format", required_argument, 0, OptOutputFormat },
-	{ "extract", no_argument, 0, OptExtract },
+	{ "native-timings", no_argument, 0, OptNativeTimings },
+	{ "preferred-timings", no_argument, 0, OptPreferredTimings },
+	{ "physical-address", no_argument, 0, OptPhysicalAddress },
 	{ "skip-hex-dump", no_argument, 0, OptSkipHexDump },
 	{ "skip-sha", no_argument, 0, OptSkipSHA },
+	{ "hide-serial-numbers", no_argument, 0, OptHideSerialNumbers },
+	{ "version", no_argument, 0, OptVersion },
 	{ "check-inline", no_argument, 0, OptCheckInline },
 	{ "check", no_argument, 0, OptCheck },
+	{ "short-timings", no_argument, 0, OptShortTimings },
+	{ "long-timings", no_argument, 0, OptLongTimings },
+	{ "xmodeline", no_argument, 0, OptXModeLineTimings },
+	{ "fbmode", no_argument, 0, OptFBModeTimings },
+	{ "v4l2-timings", no_argument, 0, OptV4L2Timings },
 	{ 0, 0, 0, 0 }
 };
 
@@ -73,13 +95,23 @@ static void usage(void)
 	       "                        hex:    hex numbers in ascii text (default for stdout)\n"
 	       "                        raw:    binary data (default unless writing to stdout)\n"
 	       "                        carray: c-program struct\n"
+	       "                        xml:    XML data\n"
 	       "  -c, --check           check if the EDID conforms to the standards, failures and\n"
 	       "                        warnings are reported at the end.\n"
 	       "  -C, --check-inline    check if the EDID conforms to the standards, failures and\n"
 	       "                        warnings are reported inline.\n"
+	       "  -n, --native-timings  report the native timings\n"
+	       "  -p, --preferred-timings report the preferred timings\n"
+	       "  -P, --physical-address only report the CEC physical address\n"
+	       "  -S, --short-timings   report all video timings in a short format\n"
+	       "  -L, --long-timings    report all video timings in a long format\n"
+	       "  -X, --xmodeline       report all long video timings in Xorg.conf format\n"
+	       "  -F, --fbmode          report all long video timings in fb.modes format\n"
+	       "  -V, --v4l2-timings    report all long video timings in v4l2-dv-timings.h format\n"
 	       "  -s, --skip-hex-dump   skip the initial hex dump of the EDID\n"
 	       "  --skip-sha            skip the SHA report\n"
-	       "  -e, --extract         extract the contents of the first block in hex values\n"
+	       "  --hide-serial-numbers replace serial numbers with '...'\n"
+	       "  --version             show the edid-decode version (SHA)\n"
 	       "  -h, --help            display this help message\n");
 }
 
@@ -87,7 +119,7 @@ static std::string s_msgs[EDID_MAX_BLOCKS + 1][2];
 
 void msg(bool is_warn, const char *fmt, ...)
 {
-	char buf[256] = "";
+	char buf[1024] = "";
 	va_list ap;
 
 	va_start(ap, fmt);
@@ -113,13 +145,13 @@ static void show_msgs(bool is_warn)
 	for (unsigned i = 0; i < state.num_blocks; i++) {
 		if (s_msgs[i][is_warn].empty())
 			continue;
-		printf("Block %u (%s):\n%s",
+		printf("Block %u, %s:\n%s",
 		       i, block_name(edid[i * EDID_PAGE_SIZE]).c_str(),
 		       s_msgs[i][is_warn].c_str());
 	}
 	if (s_msgs[EDID_MAX_BLOCKS][is_warn].empty())
 		return;
-	printf("All Blocks:\n%s",
+	printf("EDID:\n%s",
 	       s_msgs[EDID_MAX_BLOCKS][is_warn].c_str());
 }
 
@@ -130,14 +162,14 @@ void do_checksum(const char *prefix, const unsigned char *x, size_t len)
 	unsigned char sum = 0;
 	unsigned i;
 
-	printf("%sChecksum: 0x%hhx", prefix, check);
+	printf("%sChecksum: 0x%02hhx", prefix, check);
 
 	for (i = 0; i < len-1; i++)
 		sum += x[i];
 
 	if ((unsigned char)(check + sum) != 0) {
 		printf(" (should be 0x%02x)\n", -sum & 0xff);
-		fail("Invalid checksum 0x%02x (should be 0x%02x)\n",
+		fail("Invalid checksum 0x%02x (should be 0x%02x).\n",
 		     check, -sum & 0xff);
 		return;
 	}
@@ -159,137 +191,317 @@ void calc_ratio(struct timings *t)
 {
 	unsigned d = gcd(t->hact, t->vact);
 
+	if (d == 0) {
+		t->hratio = t->vratio = 0;
+		return;
+	}
 	t->hratio = t->hact / d;
 	t->vratio = t->vact / d;
 }
 
-void edid_state::print_timings(const char *prefix, const struct timings *t,
-			       const char *suffix)
+std::string edid_state::dtd_type(unsigned cnt)
+{
+	unsigned len = std::to_string(cta.preparse_total_dtds).length();
+	char buf[16];
+	sprintf(buf, "DTD %*u", len, cnt);
+	return buf;
+}
+
+bool edid_state::match_timings(const timings &t1, const timings &t2)
+{
+	if (t1.hact != t2.hact ||
+	    t1.vact != t2.vact ||
+	    t1.rb != t2.rb ||
+	    t1.interlaced != t2.interlaced ||
+	    t1.hfp != t2.hfp ||
+	    t1.hbp != t2.hbp ||
+	    t1.hsync != t2.hsync ||
+	    t1.pos_pol_hsync != t2.pos_pol_hsync ||
+	    t1.hratio != t2.hratio ||
+	    t1.vfp != t2.vfp ||
+	    t1.vbp != t2.vbp ||
+	    t1.vsync != t2.vsync ||
+	    t1.pos_pol_vsync != t2.pos_pol_vsync ||
+	    t1.vratio != t2.vratio ||
+	    t1.pixclk_khz != t2.pixclk_khz)
+		return false;
+	return true;
+}
+
+static void or_str(std::string &s, const std::string &flag, unsigned &num_flags)
+{
+	if (!num_flags)
+		s = flag;
+	else if (num_flags % 2 == 0)
+		s = s + " | \\\n\t\t" + flag;
+	else
+		s = s + " | " + flag;
+	num_flags++;
+}
+
+static void print_modeline(unsigned indent, const struct timings *t, double refresh)
+{
+	unsigned offset = (!t->even_vtotal && t->interlaced) ? 1 : 0;
+
+	printf("%*sModeline \"%ux%u_%.2f%s\" %.3f  %u %u %u %u  %u %u %u %u  %cHSync",
+	       indent, "",
+	       t->hact, t->vact, refresh,
+	       t->interlaced ? "i" : "", t->pixclk_khz / 1000.0,
+	       t->hact, t->hact + t->hfp, t->hact + t->hfp + t->hsync,
+	       t->hact + t->hfp + t->hsync + t->hbp,
+	       t->vact, t->vact + t->vfp, t->vact + t->vfp + t->vsync,
+	       t->vact + t->vfp + t->vsync + t->vbp + offset,
+	       t->pos_pol_hsync ? '+' : '-');
+	if (!t->no_pol_vsync)
+		printf(" %cVSync", t->pos_pol_vsync ? '+' : '-');
+	if (t->interlaced)
+		printf(" Interlace");
+	printf("\n");
+}
+
+static void print_fbmode(unsigned indent, const struct timings *t,
+			 double refresh, double hor_freq_khz)
+{
+	printf("%*smode \"%ux%u-%u%s\"\n",
+	       indent, "",
+	       t->hact, t->vact,
+	       (unsigned)(0.5 + (t->interlaced ? refresh / 2.0 : refresh)),
+	       t->interlaced ? "-lace" : "");
+	printf("%*s# D: %.2f MHz, H: %.3f kHz, V: %.2f Hz\n",
+	       indent + 8, "",
+	       t->pixclk_khz / 1000.0, hor_freq_khz, refresh);
+	printf("%*sgeometry %u %u %u %u 32\n",
+	       indent + 8, "",
+	       t->hact, t->vact, t->hact, t->vact);
+	unsigned mult = t->interlaced ? 2 : 1;
+	unsigned offset = !t->even_vtotal && t->interlaced;
+	printf("%*stimings %llu %d %d %d %u %u %u\n",
+	       indent + 8, "",
+	       (unsigned long long)(1000000000.0 / (double)(t->pixclk_khz) + 0.5),
+	       t->hbp, t->hfp, mult * t->vbp, mult * t->vfp + offset, t->hsync, mult * t->vsync);
+	if (t->interlaced)
+		printf("%*slaced true\n", indent + 8, "");
+	if (t->pos_pol_hsync)
+		printf("%*shsync high\n", indent + 8, "");
+	if (t->pos_pol_vsync)
+		printf("%*svsync high\n", indent + 8, "");
+	printf("%*sendmode\n", indent, "");
+}
+
+static void print_v4l2_timing(const struct timings *t,
+			      double refresh, const char *type)
+{
+	printf("\t#define V4L2_DV_BT_%uX%u%c%u_%02u { \\\n",
+	       t->hact, t->vact, t->interlaced ? 'I' : 'P',
+	       (unsigned)refresh, (unsigned)(0.5 + 100.0 * (refresh - (unsigned)refresh)));
+	printf("\t\t.type = V4L2_DV_BT_656_1120, \\\n");
+	printf("\t\tV4L2_INIT_BT_TIMINGS(%u, %u, %u, ",
+	       t->hact, t->vact, t->interlaced);
+	if (!t->pos_pol_hsync && !t->pos_pol_vsync)
+		printf("0, \\\n");
+	else if (t->pos_pol_hsync && t->pos_pol_vsync)
+		printf("\\\n\t\t\tV4L2_DV_HSYNC_POS_POL | V4L2_DV_VSYNC_POS_POL, \\\n");
+	else if (t->pos_pol_hsync)
+		printf("V4L2_DV_HSYNC_POS_POL, \\\n");
+	else
+		printf("V4L2_DV_VSYNC_POS_POL, \\\n");
+	printf("\t\t\t%lluULL, %d, %u, %d, %u, %u, %d, %u, %u, %d, \\\n",
+	       t->pixclk_khz * 1000ULL, t->hfp, t->hsync, t->hbp,
+	       t->vfp, t->vsync, t->vbp,
+	       t->interlaced ? t->vfp : 0,
+	       t->interlaced ? t->vsync : 0,
+	       t->interlaced ? t->vbp + !t->even_vtotal : 0);
+
+	std::string flags;
+	unsigned num_flags = 0;
+	unsigned vic = 0;
+	unsigned hdmi_vic = 0;
+	const char *std = "0";
+
+	if (t->interlaced && !t->even_vtotal)
+		or_str(flags, "V4L2_DV_FL_HALF_LINE", num_flags);
+	if (!memcmp(type, "VIC", 3)) {
+		or_str(flags, "V4L2_DV_FL_HAS_CEA861_VIC", num_flags);
+		or_str(flags, "V4L2_DV_FL_IS_CE_VIDEO", num_flags);
+		vic = strtoul(type + 4, 0, 0);
+	}
+	if (!memcmp(type, "HDMI VIC", 8)) {
+		or_str(flags, "V4L2_DV_FL_HAS_HDMI_VIC", num_flags);
+		or_str(flags, "V4L2_DV_FL_IS_CE_VIDEO", num_flags);
+		hdmi_vic = strtoul(type + 9, 0, 0);
+		vic = hdmi_vic_to_vic(hdmi_vic);
+		if (vic)
+			or_str(flags, "V4L2_DV_FL_HAS_CEA861_VIC", num_flags);
+	}
+	if (vic && (fmod(refresh, 6)) == 0.0)
+		or_str(flags, "V4L2_DV_FL_CAN_REDUCE_FPS", num_flags);
+	if (t->rb)
+		or_str(flags, "V4L2_DV_FL_REDUCED_BLANKING", num_flags);
+	if (t->hratio && t->vratio)
+		or_str(flags, "V4L2_DV_FL_HAS_PICTURE_ASPECT", num_flags);
+
+	if (!memcmp(type, "VIC", 3) || !memcmp(type, "HDMI VIC", 8))
+		std = "V4L2_DV_BT_STD_CEA861";
+	else if (!memcmp(type, "DMT", 3))
+		std = "V4L2_DV_BT_STD_DMT";
+	else if (!memcmp(type, "CVT", 3))
+		std = "V4L2_DV_BT_STD_CVT";
+	else if (!memcmp(type, "GTF", 3))
+		std = "V4L2_DV_BT_STD_GTF";
+	printf("\t\t\t%s, \\\n", std);
+	printf("\t\t\t%s, \\\n", flags.empty() ? "0" : flags.c_str());
+	printf("\t\t\t{ %u, %u }, %u, %u) \\\n",
+	       t->hratio, t->vratio, vic, hdmi_vic);
+	printf("\t}\n");
+}
+
+static void print_detailed_timing(unsigned indent, const struct timings *t)
+{
+	printf("%*sHfront %4d Hsync %3u Hback %3d Hpol %s",
+	       indent, "",
+	       t->hfp, t->hsync, t->hbp, t->pos_pol_hsync ? "P" : "N");
+	if (t->hborder)
+		printf(" Hborder %u", t->hborder);
+	printf("\n");
+
+	printf("%*sVfront %4u Vsync %3u Vback %3d",
+	       indent, "", t->vfp, t->vsync, t->vbp);
+	if (!t->no_pol_vsync)
+		printf(" Vpol %s", t->pos_pol_vsync ? "P" : "N");
+	if (t->vborder)
+		printf(" Vborder %u", t->vborder);
+	if (t->even_vtotal) {
+		printf(" Both Fields");
+	} else if (t->interlaced) {
+		printf(" Vfront +0.5 Odd Field\n");
+		printf("%*sVfront %4d Vsync %3u Vback %3d",
+		       indent, "", t->vfp, t->vsync, t->vbp);
+		if (!t->no_pol_vsync)
+			printf(" Vpol %s", t->pos_pol_vsync ? "P" : "N");
+		if (t->vborder)
+			printf(" Vborder %u", t->vborder);
+		printf(" Vback  +0.5 Even Field");
+	}
+	printf("\n");
+}
+
+bool edid_state::print_timings(const char *prefix, const struct timings *t,
+			       const char *type, const char *flags,
+			       bool detailed)
 {
 	if (!t) {
 		// Should not happen
-		fail("Unknown short timings\n");
-		return;
+		fail("Unknown video timings.\n");
+		return false;
 	}
 
-	unsigned htotal = t->hact + t->hfp + t->hsync + t->hbp;
-	double hor_freq_khz = (double)t->pixclk_khz / htotal;
+	if (detailed && options[OptShortTimings])
+		detailed = false;
+	if (options[OptLongTimings])
+		detailed = true;
 
-	double vtotal = t->vact + t->vfp + t->vsync + t->vbp;
-	if (t->even_vtotal)
-		vtotal = t->vact / 2.0 + t->vfp + t->vsync + t->vbp;
-	else if (t->interlaced)
-		vtotal = t->vact / 2.0 + t->vfp + t->vsync + t->vbp + 0.5;
-	double refresh = (double)t->pixclk_khz * 1000.0 / (htotal * vtotal);
+	unsigned vact = t->vact;
+	unsigned hbl = t->hfp + t->hsync + t->hbp;
+	unsigned vbl = t->vfp + t->vsync + t->vbp;
+	unsigned htotal = t->hact + hbl;
+	double hor_freq_khz = htotal ? (double)t->pixclk_khz / htotal : 0;
 
-	min_vert_freq_hz = min(min_vert_freq_hz, refresh);
-	max_vert_freq_hz = max(max_vert_freq_hz, refresh);
-	min_hor_freq_hz = min(min_hor_freq_hz, hor_freq_khz * 1000);
-	max_hor_freq_hz = max(max_hor_freq_hz, hor_freq_khz * 1000);
-	max_pixclk_khz = max(max_pixclk_khz, t->pixclk_khz);
-
-	std::string s(suffix);
-	if (t->rb) {
-		if (s.empty())
-			s = "RB";
-		else
-			s += ", RB";
-		if (t->rb == 2)
-			s += "v2";
-	}
-	if (!s.empty())
-		s = " (" + s + ")";
-
-	char buf[10];
-	sprintf(buf, "%u%s", t->vact, t->interlaced ? "i" : "");
-	printf("%s%5ux%-5s %7.3f Hz %3u:%-3u %7.3f kHz %7.3f MHz%s\n",
-	       prefix,
-	       t->hact, buf,
-	       refresh,
-	       t->hratio, t->vratio,
-	       hor_freq_khz,
-	       t->pixclk_khz / 1000.0,
-	       s.c_str());
-}
-
-bool edid_state::print_detailed_timings(const char *prefix, const struct timings &t, const char *flags)
-{
-	unsigned vact = t.vact;
-	unsigned hbl = t.hfp + t.hsync + t.hbp;
-	unsigned vbl = t.vfp + t.vsync + t.vbp;
-
-	if (t.interlaced)
+	if (t->interlaced)
 		vact /= 2;
+
+	if (t->ycbcr420)
+		hor_freq_khz /= 2;
 
 	double vtotal = vact + vbl;
 
 	bool ok = true;
 
-	if (!t.hact || !hbl || !t.hfp || !t.hsync || !vact || !vbl || !t.vfp || !t.vsync) {
-		fail("0 values in the detailed timings:\n"
+	if (!t->hact || !hbl || !t->hfp || !t->hsync ||
+	    !vact || !vbl || (!t->vfp && !t->interlaced && !t->even_vtotal) || !t->vsync) {
+		fail("0 values in the video timing:\n"
 		     "    Horizontal Active/Blanking %u/%u\n"
 		     "    Horizontal Frontporch/Sync Width %u/%u\n"
 		     "    Vertical Active/Blanking %u/%u\n"
 		     "    Vertical Frontporch/Sync Width %u/%u\n",
-		     t.hact, hbl, t.hfp, t.hsync, vact, vbl, t.vfp, t.vsync);
+		     t->hact, hbl, t->hfp, t->hsync, vact, vbl, t->vfp, t->vsync);
 		ok = false;
 	}
 
-	if (t.even_vtotal)
-		vtotal = vact + t.vfp + t.vsync + t.vbp;
-	else if (t.interlaced)
-		vtotal = vact + t.vfp + t.vsync + t.vbp + 0.5;
+	if (t->even_vtotal)
+		vtotal = vact + t->vfp + t->vsync + t->vbp;
+	else if (t->interlaced)
+		vtotal = vact + t->vfp + t->vsync + t->vbp + 0.5;
 
-	double refresh = (double)t.pixclk_khz * 1000.0 / ((t.hact + hbl) * vtotal);
+	double refresh = (double)t->pixclk_khz * 1000.0 / (htotal * vtotal);
 
-	printf("%sDetailed mode: Clock %.3f MHz", prefix, t.pixclk_khz / 1000.0);
-	if (flags && *flags)
-		printf(", %s", flags);
-	if (t.hsize_mm || t.vsize_mm)
-		printf(", %u mm x %u mm", t.hsize_mm, t.vsize_mm);
-	printf("\n");
-	printf("%s               %4u %4u %4u %4u (%3u %3u %3d)%s\n"
-	       "%s               %4u %4u %4u %4u (%3u %3u %3d)%s\n"
-	       "%s               %chsync%s\n"
-	       "%s               VertFreq: %.3f%s Hz, HorFreq: %.3f kHz\n",
-	       prefix,
-	       t.hact, t.hact + t.hfp, t.hact + t.hfp + t.hsync, t.hact + hbl, t.hfp, t.hsync, t.hbp,
-	       t.hborder ? (std::string(" hborder ") + std::to_string(t.hborder)).c_str() : "",
-	       prefix,
-	       vact, vact + t.vfp, vact + t.vfp + t.vsync, vact + vbl, t.vfp, t.vsync, t.vbp,
-	       t.vborder ? (std::string(" vborder ") + std::to_string(t.vborder)).c_str() : "",
-	       prefix,
-	       t.pos_pol_hsync ? '+' : '-', t.no_pol_vsync ? "" : (t.pos_pol_vsync ? " +vsync" : " -vsync"),
-	       prefix,
-	       refresh, t.interlaced ? "i" : "",
-	       t.hact + hbl ? (double)t.pixclk_khz / (t.hact + hbl) : 0.0);
+	std::string s;
+	if (t->rb) {
+		s = "RB";
+		if (t->rb == 2)
+			s += "v2";
+		else if (t->rb == 3)
+			s += "v3";
+	}
+	add_str(s, flags);
+	if (t->hsize_mm || t->vsize_mm)
+		add_str(s, std::to_string(t->hsize_mm) + " mm x " + std::to_string(t->vsize_mm) + " mm");
+	if (!s.empty())
+		s = " (" + s + ")";
+	unsigned pixclk_khz = t->pixclk_khz / (t->ycbcr420 ? 2 : 1);
 
-	if (t.hbp <= 0)
-		fail("0 or negative horizontal back porch\n");
-	if (t.vbp <= 0)
-		fail("0 or negative vertical back porch\n");
-	if ((!max_display_width_mm && t.hsize_mm) ||
-	    (!max_display_height_mm && t.vsize_mm)) {
-		fail("Mismatch of image size vs display size: image size is set, but not display size\n");
-	} else if (!t.hsize_mm && !t.vsize_mm) {
+	char buf[10];
+
+	sprintf(buf, "%u%s", t->vact, t->interlaced ? "i" : "");
+	printf("%s%s: %5ux%-5s %7.3f Hz %3u:%-3u %7.3f kHz %7.3f MHz%s\n",
+	       prefix, type,
+	       t->hact, buf,
+	       refresh,
+	       t->hratio, t->vratio,
+	       hor_freq_khz,
+	       pixclk_khz / 1000.0,
+	       s.c_str());
+
+	unsigned len = strlen(prefix) + 2;
+
+	if (!t->ycbcr420 && detailed && options[OptXModeLineTimings])
+		print_modeline(len, t, refresh);
+	else if (!t->ycbcr420 && detailed && options[OptFBModeTimings])
+		print_fbmode(len, t, refresh, hor_freq_khz);
+	else if (!t->ycbcr420 && detailed && options[OptV4L2Timings])
+		print_v4l2_timing(t, refresh, type);
+	else if (detailed)
+		print_detailed_timing(len + strlen(type) + 6, t);
+
+	if (t->ycbcr420 && t->pixclk_khz < 590000)
+		warn_once("Some YCbCr 4:2:0 timings are invalid for HDMI (which requires an RGB timings pixel rate >= 590 MHz).\n");
+	if (t->hfp <= 0)
+		fail("0 or negative horizontal front porch.\n");
+	if (t->hbp <= 0)
+		fail("0 or negative horizontal back porch.\n");
+	if (t->vbp <= 0)
+		fail("0 or negative vertical back porch.\n");
+	if ((!base.max_display_width_mm && t->hsize_mm) ||
+	    (!base.max_display_height_mm && t->vsize_mm)) {
+		fail("Mismatch of image size vs display size: image size is set, but not display size.\n");
+	} else if (!t->hsize_mm && !t->vsize_mm) {
 		/* this is valid */
-	} else if (t.hsize_mm > max_display_width_mm + 9 ||
-		   t.vsize_mm > max_display_height_mm + 9) {
-		fail("Mismatch of image size %ux%u mm vs display size %ux%u mm\n",
-		     t.hsize_mm, t.vsize_mm, max_display_width_mm, max_display_height_mm);
-	} else if (t.hsize_mm < max_display_width_mm - 9 &&
-		   t.vsize_mm < max_display_height_mm - 9) {
-		fail("Mismatch of image size %ux%u mm vs display size %ux%u mm\n",
-		     t.hsize_mm, t.vsize_mm, max_display_width_mm, max_display_height_mm);
+	} else if (t->hsize_mm > base.max_display_width_mm + 9 ||
+		   t->vsize_mm > base.max_display_height_mm + 9) {
+		fail("Mismatch of image size %ux%u mm vs display size %ux%u mm.\n",
+		     t->hsize_mm, t->vsize_mm, base.max_display_width_mm, base.max_display_height_mm);
+	} else if (t->hsize_mm < base.max_display_width_mm - 9 &&
+		   t->vsize_mm < base.max_display_height_mm - 9) {
+		fail("Mismatch of image size %ux%u mm vs display size %ux%u mm.\n",
+		     t->hsize_mm, t->vsize_mm, base.max_display_width_mm, base.max_display_height_mm);
 	}
 	if (refresh) {
 		min_vert_freq_hz = min(min_vert_freq_hz, refresh);
 		max_vert_freq_hz = max(max_vert_freq_hz, refresh);
 	}
-	if (t.pixclk_khz && (t.hact + hbl)) {
-		min_hor_freq_hz = min(min_hor_freq_hz, (t.pixclk_khz * 1000) / (t.hact + hbl));
-		max_hor_freq_hz = max(max_hor_freq_hz, (t.pixclk_khz * 1000) / (t.hact + hbl));
-		max_pixclk_khz = max(max_pixclk_khz, t.pixclk_khz);
+	if (pixclk_khz && (t->hact + hbl)) {
+		min_hor_freq_hz = min(min_hor_freq_hz, (pixclk_khz * 1000) / (t->hact + hbl));
+		max_hor_freq_hz = max(max_hor_freq_hz, (pixclk_khz * 1000) / (t->hact + hbl));
+		max_pixclk_khz = max(max_pixclk_khz, pixclk_khz);
 	}
 	return ok;
 }
@@ -299,6 +511,36 @@ std::string utohex(unsigned char x)
 	char buf[10];
 
 	sprintf(buf, "0x%02hhx", x);
+	return buf;
+}
+
+const char *oui_name(unsigned oui, bool reverse)
+{
+	if (reverse)
+		oui = (oui >> 16) | (oui & 0xff00) | ((oui & 0xff) << 16);
+
+	switch (oui) {
+	case 0x00001a: return "AMD";
+	case 0x000c03: return "HDMI";
+	case 0x00044b: return "NVIDIA";
+	case 0x000c6e: return "ASUS";
+	case 0x0010fa: return "Apple";
+	case 0x0014b9: return "MSTAR";
+	case 0x00d046: return "Dolby";
+	case 0x00e047: return "InFocus";
+	case 0x3a0292: return "VESA";
+	case 0x90848b: return "HDR10+";
+	case 0xc45dd8: return "HDMI Forum";
+	case 0xca125c: return "Microsoft";
+	default: return NULL;
+	}
+}
+
+std::string ouitohex(unsigned oui)
+{
+	char buf[32];
+
+	sprintf(buf, "%02X-%02X-%02X", (oui >> 16) & 0xff, (oui >> 8) & 0xff, oui & 0xff);
 	return buf;
 }
 
@@ -319,29 +561,32 @@ void hex_block(const char *prefix, const unsigned char *x,
 		return;
 
 	for (i = 0; i < length; i += step) {
+		unsigned len = min(step, length - i);
+
 		printf("%s", prefix);
-		for (j = 0; j < step; j++)
-			if (i + j < length)
-				printf("%02x ", x[i + j]);
-			else if (length > step)
-				printf("   ");
+		for (j = 0; j < len; j++)
+			printf("%s%02x", j ? " " : "", x[i + j]);
+
 		if (show_ascii) {
-			printf(" ");
-			for (j = 0; j < step && i + j < length; j++)
+			for (j = len; j < step; j++)
+				printf("   ");
+			printf(" '");
+			for (j = 0; j < len; j++)
 				printf("%c", x[i + j] >= ' ' && x[i + j] <= '~' ? x[i + j] : '.');
+			printf("'");
 		}
 		printf("\n");
 	}
 }
 
-static bool edid_add_byte(const char *s)
+static bool edid_add_byte(const char *s, bool two_digits = true)
 {
 	char buf[3];
 
 	if (state.edid_size == sizeof(edid))
 		return false;
 	buf[0] = s[0];
-	buf[1] = s[1];
+	buf[1] = two_digits ? s[1] : 0;
 	buf[2] = 0;
 	edid[state.edid_size++] = strtoul(buf, NULL, 16);
 	return true;
@@ -360,12 +605,12 @@ static bool extract_edid_quantumdata(const char *start)
 				return false;
 		start = strstr(start, "<BLOCK");
 	} while (start);
-	return state.edid_size && !(state.edid_size % EDID_PAGE_SIZE);
+	return state.edid_size;
 }
 
 static const char *ignore_chars = ",:;";
 
-static bool extract_edid_hex(const char *s)
+static bool extract_edid_hex(const char *s, bool require_two_digits = true)
 {
 	for (; *s; s++) {
 		if (isspace(*s) || strchr(ignore_chars, *s))
@@ -376,17 +621,22 @@ static bool extract_edid_hex(const char *s)
 			continue;
 		}
 
-		/* Read a %02x from the log */
-		if (!isxdigit(s[0]) || !isxdigit(s[1])) {
+		/* Read one or two hex digits from the log */
+		if (!isxdigit(s[0])) {
 			if (state.edid_size && state.edid_size % 128 == 0)
 				break;
 			return false;
 		}
-		if (!edid_add_byte(s))
+		if (require_two_digits && !isxdigit(s[1])) {
+			odd_hex_digits = true;
 			return false;
-		s++;
+		}
+		if (!edid_add_byte(s, isxdigit(s[1])))
+			return false;
+		if (isxdigit(s[1]))
+			s++;
 	}
-	return state.edid_size && !(state.edid_size % EDID_PAGE_SIZE);
+	return state.edid_size;
 }
 
 static bool extract_edid_xrandr(const char *start)
@@ -432,7 +682,7 @@ static bool extract_edid_xrandr(const char *start)
 				return false;
 		}
 	}
-	return state.edid_size && !(state.edid_size % EDID_PAGE_SIZE);
+	return state.edid_size;
 }
 
 static bool extract_edid_xorg(const char *start)
@@ -466,10 +716,10 @@ static bool extract_edid_xorg(const char *start)
 			start++;
 		}
 	}
-	return state.edid_size && !(state.edid_size % EDID_PAGE_SIZE);
+	return state.edid_size;
 }
 
-static bool extract_edid(int fd)
+static bool extract_edid(int fd, FILE *error)
 {
 	std::vector<char> edid_data;
 	char buf[EDID_PAGE_SIZE];
@@ -500,7 +750,7 @@ static bool extract_edid(int fd)
 	/* Look for C-array */
 	start = strstr(data, "unsigned char edid[] = {");
 	if (start)
-		return extract_edid_hex(strchr(start, '{') + 1);
+		return extract_edid_hex(strchr(start, '{') + 1, false);
 
 	/* Look for QuantumData EDID output */
 	start = strstr(data, "<BLOCK");
@@ -531,43 +781,14 @@ static bool extract_edid(int fd)
 		return extract_edid_hex(data);
 
 	/* Assume binary */
-	if (edid_data.size() % EDID_PAGE_SIZE || edid_data.size() > sizeof(edid))
+	if (edid_data.size() > sizeof(edid)) {
+		fprintf(error, "Binary EDID length %zu is greater than %zu.\n",
+			edid_data.size(), sizeof(edid));
 		return false;
+	}
 	memcpy(edid, data, edid_data.size());
 	state.edid_size = edid_data.size();
 	return true;
-}
-
-static void print_subsection(const char *name, const unsigned char *edid,
-			     unsigned start, unsigned end)
-{
-	unsigned i;
-
-	printf("%s:", name);
-	for (i = strlen(name); i < 15; i++)
-		printf(" ");
-	for (i = start; i <= end; i++)
-		printf(" %02x", edid[i]);
-	printf("\n");
-}
-
-static void dump_breakdown(const unsigned char *edid)
-{
-	printf("Extracted contents:\n");
-	print_subsection("header", edid, 0, 7);
-	print_subsection("serial number", edid, 8, 17);
-	print_subsection("version", edid,18, 19);
-	print_subsection("basic params", edid, 20, 24);
-	print_subsection("chroma info", edid, 25, 34);
-	print_subsection("established", edid, 35, 37);
-	print_subsection("standard", edid, 38, 53);
-	print_subsection("descriptor 1", edid, 54, 71);
-	print_subsection("descriptor 2", edid, 72, 89);
-	print_subsection("descriptor 3", edid, 90, 107);
-	print_subsection("descriptor 4", edid, 108, 125);
-	print_subsection("extensions", edid, 126, 126);
-	print_subsection("checksum", edid, 127, 127);
-	printf("\n");
 }
 
 static unsigned char crc_calc(const unsigned char *b)
@@ -602,7 +823,7 @@ static void hexdumpedid(FILE *f, const unsigned char *edid, unsigned size)
 			fprintf(f, "\n");
 		}
 		if (!crc_ok(buf))
-			fprintf(f, "Block %u has a checksum error (should be 0x%02x)\n",
+			fprintf(f, "Block %u has a checksum error (should be 0x%02x).\n",
 				b, crc_calc(buf));
 	}
 }
@@ -625,56 +846,97 @@ static void carraydumpedid(FILE *f, const unsigned char *edid, unsigned size)
 			fprintf(f, "\n");
 		}
 		if (!crc_ok(buf))
-			fprintf(f, "\t/* Block %u has a checksum error (should be 0x%02x) */\n",
+			fprintf(f, "\t/* Block %u has a checksum error (should be 0x%02x). */\n",
 				b, crc_calc(buf));
 	}
 	fprintf(f, "};\n");
 }
 
-static void write_edid(FILE *f, const unsigned char *edid, unsigned size,
-		       enum output_format out_fmt)
+// This format can be read by the QuantumData EDID editor
+static void xmldumpedid(FILE *f, const unsigned char *edid, unsigned size)
 {
+	fprintf(f, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n");
+	fprintf(f, "<DATAOBJ>\n");
+	fprintf(f, "    <HEADER TYPE=\"DID\" VERSION=\"1.0\"/>\n");
+	fprintf(f, "    <DATA>\n");
+	for (unsigned b = 0; b < size / 128; b++) {
+		const unsigned char *buf = edid + 128 * b;
+
+		fprintf(f, "        <BLOCK%u>", b);
+		for (unsigned i = 0; i < 128; i++)
+			fprintf(f, "%02X", buf[i]);
+		fprintf(f, "</BLOCK%u>\n", b);
+	}
+	fprintf(f, "    </DATA>\n");
+	fprintf(f, "</DATAOBJ>\n");
+}
+
+
+static int edid_to_file(const char *to_file, enum output_format out_fmt)
+{
+	FILE *out;
+
+	if (!strcmp(to_file, "-")) {
+		to_file = "stdout";
+		out = stdout;
+	} else if ((out = fopen(to_file, "w")) == NULL) {
+		perror(to_file);
+		return -1;
+	}
+	if (out_fmt == OUT_FMT_DEFAULT)
+		out_fmt = out == stdout ? OUT_FMT_HEX : OUT_FMT_RAW;
+
 	switch (out_fmt) {
 	default:
 	case OUT_FMT_HEX:
-		hexdumpedid(f, edid, size);
+		hexdumpedid(out, edid, state.edid_size);
 		break;
 	case OUT_FMT_RAW:
-		fwrite(edid, size, 1, f);
+		fwrite(edid, state.edid_size, 1, out);
 		break;
 	case OUT_FMT_CARRAY:
-		carraydumpedid(f, edid, size);
+		carraydumpedid(out, edid, state.edid_size);
+		break;
+	case OUT_FMT_XML:
+		xmldumpedid(out, edid, state.edid_size);
 		break;
 	}
+
+	if (out != stdout)
+		fclose(out);
+	return 0;
 }
 
-static int edid_from_file(const char *from_file, const char *to_file,
-			  enum output_format out_fmt)
+static int edid_from_file(const char *from_file, FILE *error)
 {
-	FILE *out = NULL;
+#ifdef O_BINARY
+	// Windows compatibility
+	int flags = O_RDONLY | O_BINARY;
+#else
+	int flags = O_RDONLY;
+#endif
 	int fd;
 
-	if (!from_file || !strcmp(from_file, "-")) {
+	if (!strcmp(from_file, "-")) {
 		from_file = "stdin";
 		fd = 0;
-	} else if ((fd = open(from_file, O_RDONLY)) == -1) {
+	} else if ((fd = open(from_file, flags)) == -1) {
 		perror(from_file);
 		return -1;
 	}
-	if (to_file) {
-		if (!strcmp(to_file, "-")) {
-			to_file = "stdout";
-			out = stdout;
-		} else if ((out = fopen(to_file, "w")) == NULL) {
-			perror(to_file);
-			return -1;
-		}
-		if (out_fmt == OUT_FMT_DEFAULT)
-			out_fmt = out == stdout ? OUT_FMT_HEX : OUT_FMT_RAW;
-	}
 
-	if (!extract_edid(fd)) {
-		fprintf(stderr, "EDID extract of '%s' failed\n", from_file);
+	odd_hex_digits = false;
+	if (!extract_edid(fd, error)) {
+		fprintf(error, "EDID extract of '%s' failed: ", from_file);
+		if (odd_hex_digits)
+			fprintf(error, "odd number of hexadecimal digits.\n");
+		else
+			fprintf(error, "unknown format.\n");
+		return -1;
+	}
+	if (state.edid_size % EDID_PAGE_SIZE) {
+		fprintf(error, "EDID length %u is not a multiple of %u.\n",
+			state.edid_size, EDID_PAGE_SIZE);
 		return -1;
 	}
 	state.num_blocks = state.edid_size / EDID_PAGE_SIZE;
@@ -682,17 +944,9 @@ static int edid_from_file(const char *from_file, const char *to_file,
 		close(fd);
 
 	if (memcmp(edid, "\x00\xFF\xFF\xFF\xFF\xFF\xFF\x00", 8)) {
-		fprintf(stderr, "No EDID header found in '%s'\n", from_file);
+		fprintf(error, "No EDID header found in '%s'.\n", from_file);
 		return -1;
 	}
-
-	if (out) {
-		write_edid(out, edid, state.edid_size, out_fmt);
-		if (out != stdout)
-			fclose(out);
-		return 0;
-	}
-
 	return 0;
 }
 
@@ -703,11 +957,13 @@ std::string block_name(unsigned char block)
 	char buf[10];
 
 	switch (block) {
-	case 0x00: return "Base Block";
+	case 0x00: return "Base EDID";
 	case 0x02: return "CTA-861 Extension Block";
-	case 0x10: return "VTB Extension Block";
+	case 0x10: return "Video Timing Extension Block";
+	case 0x20: return "EDID 2.0 Extension Block";
 	case 0x40: return "Display Information Extension Block";
 	case 0x50: return "Localized String Extension Block";
+	case 0x60: return "Microdisplay Interface Extension Block";
 	case 0x70: return "DisplayID Extension Block";
 	case 0xf0: return "Block Map Extension Block";
 	case 0xff: return "Manufacturer-Specific Extension Block";
@@ -719,17 +975,17 @@ std::string block_name(unsigned char block)
 
 void edid_state::parse_block_map(const unsigned char *x)
 {
-	static bool saw_block_1;
 	unsigned last_valid_block_tag = 0;
 	bool fail_once = false;
 	unsigned offset = 1;
 	unsigned i;
 
-	printf("%s\n", block.c_str());
 	if (block_nr == 1)
-		saw_block_1 = true;
-	else if (!saw_block_1)
-		fail("No EDID Block Map Extension found in block 1\n");
+		block_map.saw_block_1 = true;
+	else if (!block_map.saw_block_1)
+		fail("No EDID Block Map Extension found in block 1.\n");
+	else if (block_nr == 128)
+		block_map.saw_block_128 = true;
 
 	if (block_nr > 1)
 		offset = 128;
@@ -740,14 +996,21 @@ void edid_state::parse_block_map(const unsigned char *x)
 		if (x[i]) {
 			last_valid_block_tag++;
 			if (i != last_valid_block_tag && !fail_once) {
-				fail("Valid block tags are not consecutive\n");
+				fail("Valid block tags are not consecutive.\n");
 				fail_once = true;
 			}
-			printf("  Block %3u: %s\n", block, block_name(block).c_str());
-			if (block >= num_blocks && !fail_once) {
-				fail("Invalid block number %u\n", block);
+			printf("  Block %3u: %s\n", block, block_name(x[i]).c_str());
+			if (block >= num_blocks) {
+				if (!fail_once)
+					fail("Invalid block number %u.\n", block);
 				fail_once = true;
+			} else if (x[i] != edid[block * EDID_PAGE_SIZE]) {
+				fail("Block %u tag mismatch: expected 0x%02x, but got 0x%02x.\n",
+				     block, edid[block * EDID_PAGE_SIZE], x[i]);
 			}
+		} else if (block < num_blocks) {
+			fail("Block %u tag mismatch: expected 0x%02x, but got 0x00.\n",
+			     block, edid[block * EDID_PAGE_SIZE]);
 		}
 	}
 }
@@ -756,9 +1019,11 @@ void edid_state::preparse_extension(const unsigned char *x)
 {
 	switch (x[0]) {
 	case 0x02:
+		has_cta = true;
 		preparse_cta_block(x);
 		break;
 	case 0x70:
+		has_dispid = true;
 		preparse_displayid_block(x);
 		break;
 	}
@@ -770,6 +1035,9 @@ void edid_state::parse_extension(const unsigned char *x)
 	data_block.clear();
 
 	printf("\n");
+	if (block_nr && x[0] == 0)
+		block = "Unknown EDID Extension Block 0x00";
+	printf("Block %u, %s:\n", block_nr, block.c_str());
 
 	switch (x[0]) {
 	case 0x02:
@@ -779,8 +1047,7 @@ void edid_state::parse_extension(const unsigned char *x)
 		parse_vtb_ext_block(x);
 		break;
 	case 0x20:
-		printf("%s\n", block.c_str());
-		fail("Deprecated extension block, do not use\n");
+		fail("Deprecated extension block for EDID 2.0, do not use.\n");
 		break;
 	case 0x40:
 		parse_di_ext_block(x);
@@ -794,12 +1061,11 @@ void edid_state::parse_extension(const unsigned char *x)
 	case 0xf0:
 		parse_block_map(x);
 		if (block_nr != 1 && block_nr != 128)
-			fail("Must be used in block 1 and 128\n");
+			fail("Must be used in block 1 and 128.\n");
 		break;
 	default:
-		printf("%s\n", block.c_str());
 		hex_block("  ", x, EDID_PAGE_SIZE);
-		fail("Unknown Extension Block\n");
+		fail("Unknown Extension Block.\n");
 		break;
 	}
 
@@ -809,6 +1075,20 @@ void edid_state::parse_extension(const unsigned char *x)
 
 int edid_state::parse_edid()
 {
+	hide_serial_numbers = options[OptHideSerialNumbers];
+
+	for (unsigned i = 1; i < num_blocks; i++)
+		preparse_extension(edid + i * EDID_PAGE_SIZE);
+
+	if (options[OptPhysicalAddress]) {
+		printf("%x.%x.%x.%x\n",
+		       (cta.preparsed_phys_addr >> 12) & 0xf,
+		       (cta.preparsed_phys_addr >> 8) & 0xf,
+		       (cta.preparsed_phys_addr >> 4) & 0xf,
+		       cta.preparsed_phys_addr & 0xf);
+		return 0;
+	}
+
 	if (!options[OptSkipHexDump]) {
 		printf("edid-decode (hex):\n\n");
 		for (unsigned i = 0; i < num_blocks; i++) {
@@ -818,14 +1098,9 @@ int edid_state::parse_edid()
 		printf("----------------\n\n");
 	}
 
-	if (options[OptExtract])
-		dump_breakdown(edid);
-
 	block = block_name(0x00);
+	printf("Block %u, %s:\n", block_nr, block.c_str());
 	parse_base_block(edid);
-
-	for (unsigned i = 1; i < num_blocks; i++)
-		preparse_extension(edid + i * EDID_PAGE_SIZE);
 
 	for (unsigned i = 1; i < num_blocks; i++) {
 		block_nr++;
@@ -835,52 +1110,63 @@ int edid_state::parse_edid()
 
 	block = "";
 	block_nr = EDID_MAX_BLOCKS;
-	if (uses_gtf && !supports_gtf)
-		fail("GTF timings are used, but the EDID does not signal GTF support\n");
-	if (uses_cvt && !supports_cvt)
-		fail("CVT timings are used, but the EDID does not signal CVT support\n");
-	if (has_display_range_descriptor &&
-	    (min_vert_freq_hz < min_display_vert_freq_hz ||
-	     max_vert_freq_hz > max_display_vert_freq_hz ||
-	     min_hor_freq_hz / 1000 < min_display_hor_freq_hz / 1000 ||
-	     max_hor_freq_hz / 1000  > max_display_hor_freq_hz / 1000 ||
-	     max_pixclk_khz > max_display_pixclk_khz)) {
-		/*
-		 * EDID 1.4 states (in an Errata) that explicitly defined
-		 * timings supersede the monitor range definition.
-		 */
-		char buf[512];
-		snprintf(buf, sizeof(buf),
-			"One or more of the timings is out of range of the Monitor Ranges:\n"
-			"    Vertical Freq: %u - %u Hz (Monitor: %u - %u Hz)\n"
-			"    Horizontal Freq: %.3f - %.3f kHz (Monitor: %.3f - %.3f kHz)\n"
-			"    Maximum Clock: %.3f MHz (Monitor: %.3f MHz)\n",
-			min_vert_freq_hz, max_vert_freq_hz,
-			min_display_vert_freq_hz, max_display_vert_freq_hz,
-			min_hor_freq_hz / 1000.0, max_hor_freq_hz / 1000.0,
-			min_display_hor_freq_hz / 1000.0, max_display_hor_freq_hz / 1000.0,
-			max_pixclk_khz / 1000.0, max_display_pixclk_khz / 1000.0);
 
-		if (edid_minor < 4) {
-			fail("%s", buf);
-		} else {
-			warn("%s", buf);
-		}
+	if (has_cta)
+		cta_resolve_svrs();
+
+	if (options[OptPreferredTimings] && base.preferred_timing.is_valid()) {
+		printf("\n----------------\n");
+		printf("\nPreferred Video Timing if only Block 0 is parsed:\n");
+		print_timings("  ", base.preferred_timing, true);
+	}
+
+	if (options[OptNativeTimings] &&
+	    base.preferred_timing.is_valid() && base.preferred_is_also_native) {
+		printf("\n----------------\n");
+		printf("\nNative Video Timing if only Block 0 is parsed:\n");
+		print_timings("  ", base.preferred_timing, true);
+	}
+
+	if (options[OptPreferredTimings] && !cta.preferred_timings.empty()) {
+		printf("\n----------------\n");
+		printf("\nPreferred Video Timing%s if Block 0 and CTA-861 Blocks are parsed:\n",
+		       cta.preferred_timings.size() > 1 ? "s" : "");
+		for (vec_timings_ext::iterator iter = cta.preferred_timings.begin();
+		     iter != cta.preferred_timings.end(); ++iter)
+			print_timings("  ", *iter, true);
+	}
+
+	if (options[OptNativeTimings] && !cta.native_timings.empty()) {
+		printf("\n----------------\n");
+		printf("\nNative Video Timing%s if Block 0 and CTA-861 Blocks are parsed:\n",
+		       cta.native_timings.size() > 1 ? "s" : "");
+		for (vec_timings_ext::iterator iter = cta.native_timings.begin();
+		     iter != cta.native_timings.end(); ++iter)
+			print_timings("  ", *iter, true);
+	}
+
+	if (options[OptPreferredTimings] && !dispid.preferred_timings.empty()) {
+		printf("\n----------------\n");
+		printf("\nPreferred Video Timing%s if Block 0 and DisplayID Blocks are parsed:\n",
+		       dispid.preferred_timings.size() > 1 ? "s" : "");
+		for (vec_timings_ext::iterator iter = dispid.preferred_timings.begin();
+		     iter != dispid.preferred_timings.end(); ++iter)
+			print_timings("  ", *iter, true);
 	}
 
 	if (!options[OptCheck] && !options[OptCheckInline])
 		return 0;
 
+	check_base_block();
+	if (has_cta)
+		check_cta_blocks();
+	if (has_dispid)
+		check_displayid_blocks();
+
 	printf("\n----------------\n");
 
-	if (!options[OptSkipSHA]) {
-#ifdef SHA
-#define STR(x) #x
-#define STRING(x) STR(x)
-		printf("\nedid-decode SHA: %s\n", STRING(SHA));
-#else
-		printf("\nedid-decode SHA: not available\n");
-#endif
+	if (!options[OptSkipSHA] && strlen(STRING(SHA))) {
+		printf("\nedid-decode SHA: %s %s\n", STRING(SHA), STRING(DATE));
 	}
 
 	if (options[OptCheck]) {
@@ -929,28 +1215,65 @@ int main(int argc, char **argv)
 				out_fmt = OUT_FMT_RAW;
 			} else if (!strcmp(optarg, "carray")) {
 				out_fmt = OUT_FMT_CARRAY;
+			} else if (!strcmp(optarg, "xml")) {
+				out_fmt = OUT_FMT_XML;
 			} else {
 				usage();
 				exit(1);
 			}
 			break;
 		case ':':
-			fprintf(stderr, "Option '%s' requires a value\n",
+			fprintf(stderr, "Option '%s' requires a value.\n",
 				argv[optind]);
 			usage();
 			return -1;
 		case '?':
-			fprintf(stderr, "Unknown argument '%s'\n",
+			fprintf(stderr, "Unknown argument '%s'.\n",
 				argv[optind]);
 			usage();
 			return -1;
 		}
 	}
+	if (optind == argc && options[OptVersion]) {
+		if (strlen(STRING(SHA)))
+			printf("edid-decode SHA: %s %s\n", STRING(SHA), STRING(DATE));
+		else
+			printf("edid-decode SHA: not available\n");
+		return 0;
+	}
+
 	if (optind == argc)
-		ret = edid_from_file(NULL, NULL, out_fmt);
-	else if (optind == argc - 1)
-		ret = edid_from_file(argv[optind], NULL, out_fmt);
+		ret = edid_from_file("-", stdout);
 	else
-		return edid_from_file(argv[optind], argv[optind + 1], out_fmt);
+		ret = edid_from_file(argv[optind], argv[optind + 1] ? stderr : stdout);
+
+	if (ret && options[OptPhysicalAddress]) {
+		printf("f.f.f.f\n");
+		return 0;
+	}
+	if (optind < argc - 1)
+		return ret ? ret : edid_to_file(argv[optind + 1], out_fmt);
+
 	return ret ? ret : state.parse_edid();
 }
+
+#ifdef __EMSCRIPTEN__
+/*
+ * The surrounding JavaScript implementation will call this function
+ * each time it wants to decode an EDID. So this should reset all the
+ * state and start over.
+ */
+extern "C" int parse_edid(const char *input)
+{
+	for (unsigned i = 0; i < EDID_MAX_BLOCKS + 1; i++) {
+		s_msgs[i][0].clear();
+		s_msgs[i][1].clear();
+	}
+	options[OptCheck] = 1;
+	options[OptPreferredTimings] = 1;
+	options[OptNativeTimings] = 1;
+	state = edid_state();
+	int ret = edid_from_file(input, stderr);
+	return ret ? ret : state.parse_edid();
+}
+#endif
