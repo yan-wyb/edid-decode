@@ -1,5 +1,5 @@
 version=4
 
 opts="mode=git, gitmode=full, pgpmode=none, pretty=0.1~git%cd.%h, repack, compression=xz" \
- https://git.linuxtv.org/cgit.cgi/edid-decode.git \
+ https://git.linuxtv.org/edid-decode.git \
  HEAD
